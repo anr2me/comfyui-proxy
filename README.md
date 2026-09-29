@@ -15,8 +15,11 @@ git clone https://github.com/anr2me/comfyui-proxy.git
 ```
 Only `aiohttp` is a hard dependency, which ComfyUI already ships with.
 
-Optionally, `pip install -r requirements.txt` (Brotli + zstandard) if your
-remote endpoint or its gateway might compress responses with `br` or `zstd`.
+Optionally, install (Brotli + zstandard) if your remote endpoint or its gateway might compress responses with `br` or `zstd`. 
+```bash
+cd comfyui-proxy
+pip install -r requirements.txt
+```
 These are only used on the handful of routes the proxy actually reads and
 parses (`/prompt`, `/queue`, the wake-up ping, the one-time `/object_info`
 model pull) — if they're missing, those specific calls fail with a clear
