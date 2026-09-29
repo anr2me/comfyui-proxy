@@ -65,16 +65,23 @@ def _should_proxy(path: str) -> bool:
 
 def _merge_remote_models(resp: web.StreamResponse, cache: dict) -> web.StreamResponse:
     if not isinstance(resp, web.Response):
+        logger.warning(
+            f"[ComfyUI Proxy] /object_info response is {type(resp).__name__}, not a plain "
+            "web.Response (likely streamed by another middleware) — cannot patch model dropdowns."
+        )
         return resp
     try:
         raw = resp.body
         if not raw:
+            logger.warning("[ComfyUI Proxy] /object_info response had no body to patch.")
             return resp
         data = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[ComfyUI Proxy] Could not parse local /object_info JSON to patch models: {e}")
         return resp
 
     changed = False
+    matched_keys = 0
     for key, model_list in cache.items():
         node_name, _, pname = key.partition(".")
         node_info = data.get(node_name)
@@ -87,9 +94,17 @@ def _merge_remote_models(resp: web.StreamResponse, cache: dict) -> web.StreamRes
             if isinstance(pdef, list) and len(pdef) > 0:
                 pdef[0] = model_list
                 changed = True
+                matched_keys += 1
 
     if not changed:
+        logger.warning(
+            f"[ComfyUI Proxy] Model cache has {len(cache)} field(s) but none matched a local "
+            "node/input name — the remote and local node sets may differ (e.g. a custom "
+            "combo widget), so nothing was patched."
+        )
         return resp
+
+    logger.info(f"[ComfyUI Proxy] Patched {matched_keys} model dropdown field(s) in /object_info from the remote cache.")
     return web.Response(body=json.dumps(data).encode("utf-8"), status=resp.status, content_type="application/json")
 
 
@@ -244,7 +259,9 @@ async def proxy_middleware(request: web.Request, handler):
 
 def _public_config() -> dict:
     cfg = dict(cfgmod.load_config())
-    cfg["has_models_cache"] = bool(cfg.get("models_cache"))
+    models_cache = cfg.get("models_cache") or {}
+    cfg["has_models_cache"] = bool(models_cache)
+    cfg["models_cache_count"] = len(models_cache)
     cfg["auth_key_set"] = bool(cfg.get("auth_key"))
     cfg.pop("models_cache", None)
     cfg.pop("auth_key", None)

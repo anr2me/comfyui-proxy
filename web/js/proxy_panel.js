@@ -202,7 +202,7 @@ app.registerExtension({
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             statusLine.textContent = cfg.remote_url
                 ? cfg.has_models_cache
-                    ? "Remote model list cached."
+                    ? `Remote model list cached (${cfg.models_cache_count} field${cfg.models_cache_count === 1 ? "" : "s"}).`
                     : "Remote model list not yet cached."
                 : "No remote URL configured yet.";
         }
