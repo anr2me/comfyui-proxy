@@ -13,8 +13,16 @@ Clone this repository into `ComfyUI/custom_nodes/` directory and restart ComfyUI
 cd ComfyUI/custom_nodes
 git clone https://github.com/anr2me/comfyui-proxy.git
 ```
-No extra Python dependencies — it only uses `aiohttp`, which
-ComfyUI already depends on.
+Only `aiohttp` is a hard dependency, which ComfyUI already ships with.
+
+Optionally, `pip install -r requirements.txt` (Brotli + zstandard) if your
+remote endpoint or its gateway might compress responses with `br` or `zstd`.
+These are only used on the handful of routes the proxy actually reads and
+parses (`/prompt`, `/queue`, the wake-up ping, the one-time `/object_info`
+model pull) — if they're missing, those specific calls fail with a clear
+"install Brotli/zstandard" error instead of crashing, everything else
+(`/view`, `/viewvideo`, `/history`, etc.) is streamed byte-for-byte and never
+needs them regardless of encoding.
 
 ## What gets proxied
 

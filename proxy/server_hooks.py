@@ -97,6 +97,38 @@ def _merge_remote_models(resp: web.StreamResponse, cache: dict) -> web.StreamRes
 # Buffered (non-streamed) handlers for routes we need to introspect
 # ---------------------------------------------------------------------------
 
+async def _read_tracking_response(r: aiohttp.ClientResponse, context: str):
+    """Read + parse a response from the auto-decompressing tracking session.
+
+    Decompression happens lazily on read, so a missing 'Brotli'/'zstandard'
+    package (or a corrupt/unsupported encoding) surfaces here rather than
+    deep inside aiohttp. Returns (data, text, error_response); error_response
+    is only set when reading itself failed, so callers can bail out cleanly
+    instead of risking a second failing read on the same broken stream.
+    """
+    try:
+        raw = await r.read()
+    except (aiohttp.ClientPayloadError, RuntimeError, LookupError, UnicodeDecodeError) as e:
+        logger.error(f"[ComfyUI Proxy] Failed to decode remote response for {context}: {e}")
+        return None, None, web.json_response(
+            {
+                "error": (
+                    f"ComfyUI Proxy: failed to decode the remote's response for {context} ({e}). "
+                    "If the remote/gateway compresses responses with brotli or zstd, install the "
+                    "'Brotli' and 'zstandard' packages in ComfyUI's Python environment."
+                )
+            },
+            status=502,
+        )
+
+    try:
+        data = json.loads(raw) if raw else None
+    except Exception:
+        data = None
+    text = None if data is not None else raw.decode("utf-8", errors="replace")
+    return data, text, None
+
+
 async def _handle_prompt(request: web.Request) -> web.Response:
     base = forwarder.target_base()
     body = await request.read()
@@ -107,11 +139,9 @@ async def _handle_prompt(request: web.Request) -> web.Response:
     try:
         async with session.post(f"{base}/prompt", data=body, headers=headers, timeout=timeout) as r:
             status = r.status
-            try:
-                data = await r.json(content_type=None)
-            except Exception:
-                data = None
-            text = None if data is not None else await r.text()
+            data, text, err = await _read_tracking_response(r, "/prompt")
+            if err:
+                return err
     except asyncio.TimeoutError:
         logger.error("[ComfyUI Proxy] Timeout submitting prompt to remote GPU")
         return web.json_response(
@@ -145,10 +175,9 @@ async def _handle_queue(request: web.Request) -> web.Response:
     try:
         async with session.get(url, headers=headers, timeout=timeout) as r:
             status = r.status
-            try:
-                data = await r.json(content_type=None)
-            except Exception:
-                data = None
+            data, _text, err = await _read_tracking_response(r, "/queue")
+            if err:
+                return err
     except asyncio.TimeoutError:
         logger.error("[ComfyUI Proxy] Timeout fetching remote queue state")
         return web.json_response({"error": "ComfyUI Proxy: remote GPU timed out"}, status=504)

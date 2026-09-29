@@ -43,12 +43,15 @@ app.registerExtension({
             background: "#2b2b2b",
             border: "1px solid #444",
             borderRadius: "20px",
-            padding: "6px 12px",
+            padding: "8px 12px",
+            minHeight: "28px",
             cursor: "grab",
             boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
             color: "#ddd",
             fontSize: "12px",
         });
+
+        pill.style.touchAction = "none"; // let us handle drag gestures instead of the page scrolling
 
         const dot = document.createElement("span");
         Object.assign(dot.style, {
@@ -172,6 +175,25 @@ app.registerExtension({
             return r.json();
         }
 
+        async function refreshFrontendComboLists() {
+            // The graph editor caches node defs (incl. dropdown options) from
+            // /object_info at page load; newly patched server-side data won't
+            // show up in existing OR new nodes until the frontend re-pulls
+            // those defs. ComfyUI exposes app.refreshComboInNodes() for
+            // exactly this (used by manager-style extensions after installing
+            // models) — use it when available, otherwise fall back to a full
+            // reload so the dropdown is guaranteed correct.
+            try {
+                if (typeof app.refreshComboInNodes === "function") {
+                    await app.refreshComboInNodes();
+                    return true;
+                }
+            } catch (e) {
+                console.warn("[ComfyUI Proxy] refreshComboInNodes failed", e);
+            }
+            return false;
+        }
+
         function refreshUI(cfg) {
             toggle.checked = !!cfg.enabled;
             dot.style.background = cfg.enabled ? "#4caf50" : "#888";
@@ -218,6 +240,12 @@ app.registerExtension({
                 const cfg = await postConfig(patch);
                 refreshUI(cfg);
                 authInput.value = "";
+                if (cfg.has_models_cache) {
+                    const ok = await refreshFrontendComboLists();
+                    if (!ok) {
+                        statusLine.textContent += " Reload the page to see updated model dropdowns.";
+                    }
+                }
             } catch (e) {
                 console.error("[ComfyUI Proxy] Failed to save config", e);
             }
@@ -230,6 +258,10 @@ app.registerExtension({
                 await fetch("/comfyui_proxy/refresh_models", { method: "POST" });
                 const cfg = await getConfig();
                 refreshUI(cfg);
+                const ok = await refreshFrontendComboLists();
+                if (!ok) {
+                    statusLine.textContent += " Reload the page to see updated model dropdowns.";
+                }
             } catch (e) {
                 console.error("[ComfyUI Proxy] Failed to refresh models", e);
             }
@@ -237,35 +269,67 @@ app.registerExtension({
         });
 
         // --- Dragging the pill moves the whole panel ---
+        // Pointer Events unify mouse, touch, and pen in one code path, which
+        // is what makes this work on mobile browsers (plain mouse* events
+        // never fire there).
         let dragging = false;
+        let moved = false;
         let startX, startY, origX, origY;
+        const DRAG_THRESHOLD = 4; // px, so a tap still reaches the toggle/label
 
-        pill.addEventListener("mousedown", (e) => {
-            if (e.target === toggle || e.target === label) return;
+        pill.addEventListener("pointerdown", (e) => {
+            if (e.target === toggle) return;
             dragging = true;
+            moved = false;
+            pill.setPointerCapture(e.pointerId);
             pill.style.cursor = "grabbing";
             startX = e.clientX;
             startY = e.clientY;
             const rect = root.getBoundingClientRect();
             origX = rect.left;
             origY = rect.top;
-            e.preventDefault();
         });
-        window.addEventListener("mousemove", (e) => {
+        pill.addEventListener("pointermove", (e) => {
             if (!dragging) return;
             const dx = e.clientX - startX;
             const dy = e.clientY - startY;
-            const x = Math.max(0, origX + dx);
-            const y = Math.max(0, origY + dy);
+            if (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD) {
+                moved = true;
+            }
+            if (!moved) return;
+            const maxX = window.innerWidth - root.offsetWidth;
+            const maxY = window.innerHeight - 20;
+            const x = Math.min(Math.max(0, origX + dx), Math.max(0, maxX));
+            const y = Math.min(Math.max(0, origY + dy), Math.max(0, maxY));
             root.style.left = x + "px";
             root.style.top = y + "px";
+            e.preventDefault();
         });
-        window.addEventListener("mouseup", () => {
+        function endDrag(e) {
             if (!dragging) return;
             dragging = false;
             pill.style.cursor = "grab";
+            try {
+                pill.releasePointerCapture(e.pointerId);
+            } catch (err) {
+                /* ignore */
+            }
             const rect = root.getBoundingClientRect();
             savePos({ x: rect.left, y: rect.top });
-        });
+            // Swallow the click that follows a real drag so it doesn't
+            // toggle the expanded panel by accident; a plain tap still works
+            // since `moved` stays false for it.
+            if (moved) {
+                const suppressClick = (ev) => {
+                    ev.stopPropagation();
+                    ev.preventDefault();
+                    label.removeEventListener("click", suppressClick, true);
+                };
+                label.addEventListener("click", suppressClick, true);
+                setTimeout(() => label.removeEventListener("click", suppressClick, true), 0);
+            }
+        }
+        pill.addEventListener("pointerup", endDrag);
+        pill.addEventListener("pointercancel", endDrag);
     },
 });
