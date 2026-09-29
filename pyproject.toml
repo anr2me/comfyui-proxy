@@ -1,0 +1,9 @@
+[project]
+name = "comfyui-proxy"
+description = "Forward ComfyUI job/output/WebSocket traffic to a configurable cloud or serverless GPU endpoint, while workflow editing stays fully local."
+version = "1.0.0"
+
+[tool.comfy]
+PublisherId = "your-name-here"
+DisplayName = "ComfyUI Proxy"
+Icon = ""
