@@ -8,8 +8,12 @@ a small form for the remote URL, timeout, and an optional auth key.
 
 ## Install
 
-Drop this folder into `ComfyUI/custom_nodes/comfyui-proxy` and restart
-ComfyUI. No extra Python dependencies — it only uses `aiohttp`, which
+Clone this repository into `ComfyUI/custom_nodes/` directory and restart ComfyUI. 
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/anr2me/comfyui-proxy.git
+```
+No extra Python dependencies — it only uses `aiohttp`, which
 ComfyUI already depends on.
 
 ## What gets proxied
