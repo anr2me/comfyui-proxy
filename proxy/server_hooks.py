@@ -12,8 +12,13 @@ Routing rules:
     always forwarded when the proxy is enabled (these are job/output related
     and meaningless without the cloud GPU that actually ran the job).
   - /queue is always forwarded when enabled (needed to know remote job state).
-  - /ws and /internal/logs are ONLY forwarded while a job is known to be
-    incomplete, so opening the UI alone never spins up a serverless instance.
+  - /ws is NEVER proxied as an HTTP route: the browser's websocket connection
+    is opened once at page load and can't be redirected after the fact.
+    Instead, submitting /prompt opens a dedicated shadow websocket from the
+    proxy itself to the remote (same clientId) and relays every message onto
+    the browser's already-open local socket — see relay.py. /internal/logs
+    is likewise never proxied as an HTTP route; remote log lines arrive
+    through that same shadow connection once relay.py subscribes to them.
   - /object_info is always served locally (workflow editing needs no cloud
     GPU), but its combo/dropdown model lists are patched with the cached
     remote model list when available, so users can't pick a model that only
@@ -35,6 +40,7 @@ from server import PromptServer
 from . import config as cfgmod
 from . import forwarder
 from . import models_cache
+from . import relay
 from . import state
 
 logger = logging.getLogger("ComfyUIProxy")
@@ -44,7 +50,6 @@ ALWAYS_PROXY_EXACT = {"/prompt", "/interrupt", "/upload/image", "/upload/mask", 
 # "/api/jobs", "/api/crystools" are their own real namespace (not aliases of a plain route).
 CORE_PROXY_PREFIXES = ("/history", "/view", "/viewvideo")
 EXTRA_PROXY_PREFIXES = ("/api/jobs", "/api/crystools")
-CONDITIONAL_ROUTES = {"/ws", "/internal/logs"}
 WAKE_TRIGGER_ROUTES = {"/prompt", "/queue"}
 
 
@@ -65,8 +70,6 @@ def _is_enabled() -> bool:
 
 def _should_proxy(path: str) -> bool:
     canonical = _strip_api_prefix(path)
-    if canonical in CONDITIONAL_ROUTES:
-        return state.has_incomplete_job()
     if canonical in ALWAYS_PROXY_EXACT:
         return True
     if any(canonical == p or canonical.startswith(p + "/") for p in CORE_PROXY_PREFIXES):
@@ -166,6 +169,22 @@ async def _read_tracking_response(r: aiohttp.ClientResponse, context: str):
 async def _handle_prompt(request: web.Request) -> web.Response:
     base = forwarder.target_base()
     body = await request.read()
+
+    client_id = None
+    try:
+        client_id = (json.loads(body) or {}).get("client_id")
+    except Exception:
+        pass
+
+    if client_id:
+        # Open (or reuse) the shadow progress relay and wait for the remote
+        # to confirm its sid before the job actually starts, so the local
+        # UI is guaranteed to receive progress instead of showing "running
+        # in another tab".
+        await relay.ensure_relay_ready(client_id, wait_timeout=forwarder.get_timeout().total)
+    else:
+        logger.warning("[ComfyUI Proxy] /prompt submission had no client_id — live progress relay can't be set up for it.")
+
     headers = forwarder.copy_request_headers(request, limit_encoding=True)
     session = forwarder.get_tracking_session()
     timeout = forwarder.get_timeout()
@@ -190,7 +209,7 @@ async def _handle_prompt(request: web.Request) -> web.Response:
     if data is not None:
         if 200 <= status < 300:
             prompt_id = data.get("prompt_id")
-            state.mark_job_queued(prompt_id)
+            state.mark_job_queued(prompt_id, client_id)
             logger.info(f"[ComfyUI Proxy] Job {prompt_id} queued on remote GPU.")
         elif status >= 500:
             logger.error(f"[ComfyUI Proxy] Remote GPU returned HTTP {status} queuing prompt.")
@@ -259,14 +278,12 @@ async def proxy_middleware(request: web.Request, handler):
         return await handler(request)
 
     # Wake-up gating: only /prompt, /queue, or an already-known incomplete
-    # job (covers /ws, /internal/logs, /history, /view while a job runs).
+    # job (covers /history, /view while a job runs).
     if canonical in WAKE_TRIGGER_ROUTES:
         await forwarder.wake_remote_if_needed(f"request to {path}")
     elif state.has_incomplete_job():
         asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
 
-    if canonical == "/ws":
-        return await forwarder.forward_websocket(request)
     if canonical == "/prompt" and request.method == "POST":
         return await _handle_prompt(request)
     if canonical == "/queue" and request.method == "GET":
@@ -314,7 +331,7 @@ def setup():
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        allowed = {"enabled", "remote_url", "timeout", "auth_key"}
+        allowed = {"enabled", "remote_url", "timeout", "auth_key", "post_completion_delay"}
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
             clean["remote_url"] = (clean["remote_url"] or "").strip().rstrip("/")
@@ -323,6 +340,11 @@ def setup():
                 clean["timeout"] = max(5, float(clean["timeout"]))
             except (TypeError, ValueError):
                 clean.pop("timeout", None)
+        if "post_completion_delay" in clean:
+            try:
+                clean["post_completion_delay"] = max(0, float(clean["post_completion_delay"]))
+            except (TypeError, ValueError):
+                clean.pop("post_completion_delay", None)
         if "auth_key" in clean and not clean["auth_key"]:
             clean.pop("auth_key", None)  # blank means "leave unchanged"
 

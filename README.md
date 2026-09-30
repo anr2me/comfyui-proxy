@@ -4,7 +4,8 @@ Forwards job-related ComfyUI API/WebSocket traffic to a configurable cloud or
 serverless GPU endpoint, while node-graph editing (`/object_info`, static
 assets, settings, etc.) always stays local. A movable toggle pill in the
 corner of the UI lets you flip between local and cloud GPU, and expands into
-a small form for the remote URL, timeout, and an optional auth key.
+a small form for the remote URL, timeout, post-completion delay, and an
+optional auth key.
 
 ## Install
 
@@ -36,7 +37,7 @@ encoding.
 | `/prompt`, `/queue` | Always, when the toggle is on. These also **wake** the remote (cold boot). |
 | `/interrupt`, `/upload/image`, `/upload/mask`, `/free` | Always, when the toggle is on. |
 | `/history*`, `/view*`, `/viewvideo*`, `/api/jobs*`, `/api/crystools*` | Always, when the toggle is on (partial/range content and streaming are preserved). |
-| `/ws`, `/internal/logs` | **Only** while a job is known to be incomplete (queued/running remotely) — so simply having the toggle on never spins up a serverless instance by itself. |
+| `/ws`, `/internal/logs` | **Never** proxied as HTTP routes — see [Live progress](#live-progress-ws) below for how remote progress/logs actually reach the browser instead. |
 | `/object_info` | Never proxied — served locally so the graph editor keeps working offline, but combo/dropdown model fields are patched in-place with the cached remote model list (see below) so you can't pick a checkpoint that only exists on your machine. |
 | Everything else | Untouched, served locally as normal. |
 
@@ -45,13 +46,11 @@ encoding.
 The remote is only pinged (`GET /system_stats`) to trigger a cold boot in
 these cases:
 - a `/prompt` or `/queue` request comes in while the proxy is enabled,
-- a request to a conditional route (`/ws`, `/internal/logs`, etc.) arrives
-  while a job is already known to be incomplete,
+- the shadow progress relay opens a connection ahead of a `/prompt` submission,
 - the model list needs its first-time pull after enabling or changing the URL.
 
 Each wake attempt logs `Initializing remote GPU...` through Python's
-`logging` module, which ComfyUI surfaces on `/internal/logs` (and console),
-so you can watch cold-boot progress without extra polling.
+`logging` module, visible in the ComfyUI console.
 
 ## Model list caching
 
@@ -63,18 +62,48 @@ fields swapped in-place with the cached remote list — local-only models are
 simply not in that list, since it comes straight from the remote. Use the
 "Refresh Models" button in the panel to force a re-pull at any time.
 
+## Live progress (`/ws`)
+
+The browser opens its `/ws` connection once, at page load — by the time a
+job starts there's no "future `/ws` request" left to redirect to the
+remote, so literally proxying that route doesn't work. Instead:
+
+1. When `/prompt` is submitted, the proxy reads the `client_id` from the
+   payload (the same id the browser used for its own local `/ws`
+   connection) and opens a dedicated **shadow websocket** from the proxy
+   process itself to the remote's `/ws?clientId=<id>`, waiting for the
+   remote's first `status` message (which carries the `sid` it assigned)
+   before the prompt is actually sent — this avoids the remote treating the
+   connection as mismatched ("running in another tab").
+2. Once ready, the proxy sends `PATCH /internal/logs/subscribe` with
+   `{"enabled": true, "clientId": <id>}` so remote execution logs start
+   arriving as messages on that same shadow socket too.
+3. Every message the remote sends (progress, previews, logs — text or
+   binary) is immediately re-emitted onto the browser's **already-open
+   local** `/ws` socket, found via `PromptServer.instance.sockets[client_id]`.
+   From the browser's perspective these are indistinguishable from
+   locally-generated messages.
+4. Once every prompt tracked for that client has completed, the proxy waits
+   a configurable delay (**Post-completion delay**, default 5s) before
+   unsubscribing logs and closing the shadow connection, so in-flight
+   progress bar / log animations have time to finish.
+
+`/internal/logs` is likewise never proxied as an HTTP route for this same
+reason — remote log lines arrive through the shadow connection instead.
+
 ## Job tracking
 
 A prompt is considered "incomplete" from the moment `/prompt` returns a
 `prompt_id` until either:
-- the remote's `/ws` stream reports `executing` with `node: null` or an
-  `execution_success` / `execution_error` / `execution_interrupted` message
-  for that id, or
+- the shadow relay's `/ws` stream reports `executing` with `node: null`, or
+  an `execution_success` / `execution_error` / `execution_interrupted`
+  message, for that id, or
 - `/queue` is polled and both `queue_running` and `queue_pending` come back
   empty, or
 - `/interrupt` is called.
 
-This state is what gates `/ws` and `/internal/logs` forwarding.
+This state (scoped per `client_id`) is what the shadow relay uses to decide
+when it's safe to close.
 
 ## Streaming, encoding, and errors
 
@@ -97,7 +126,8 @@ This state is what gates `/ws` and `/internal/logs` forwarding.
 - `GET /comfyui_proxy/config` — current settings (auth key is redacted, only
   a boolean `auth_key_set` is returned).
 - `POST /comfyui_proxy/config` — update `enabled`, `remote_url`, `timeout`,
-  `auth_key` (send an empty string to leave the stored key unchanged).
+  `post_completion_delay`, `auth_key` (send an empty string for `auth_key`
+  to leave the stored key unchanged).
 - `POST /comfyui_proxy/refresh_models` — force a fresh pull of the remote
   model list.
 

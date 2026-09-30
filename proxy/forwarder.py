@@ -14,15 +14,13 @@ Two aiohttp ClientSessions are kept alive for the process lifetime:
 
 import asyncio
 import importlib
-import json
 import logging
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
 
 from . import config as cfgmod
-from . import state
 
 logger = logging.getLogger("ComfyUIProxy")
 
@@ -33,10 +31,6 @@ _tracking_session = None
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
-}
-
-_COMPLETION_MSG_TYPES = {
-    "execution_success", "execution_error", "execution_interrupted",
 }
 
 
@@ -227,82 +221,3 @@ async def forward_http(request: web.Request) -> web.StreamResponse:
     except (UnicodeDecodeError, LookupError) as e:
         logger.error(f"[ComfyUI Proxy] Encoding error while forwarding: {e}")
         return web.json_response({"error": "ComfyUI Proxy: encoding error while forwarding response"}, status=502)
-
-
-def _inspect_ws_message_for_completion(raw_text: str):
-    """Best-effort peek at relayed ws JSON to detect job completion, so we can
-    stop treating the job as 'incomplete' (and eventually let /ws and
-    /internal/logs fall back to local) without polling anything extra."""
-    try:
-        msg = json.loads(raw_text)
-    except Exception:
-        return
-    mtype = msg.get("type")
-    data = msg.get("data") or {}
-    prompt_id = data.get("prompt_id")
-    if mtype == "executing" and data.get("node") is None:
-        state.mark_job_done(prompt_id)
-    elif mtype in _COMPLETION_MSG_TYPES:
-        state.mark_job_done(prompt_id)
-
-
-async def forward_websocket(request: web.Request) -> web.WebSocketResponse:
-    """Bridge the browser's /ws connection to the remote's /ws connection for
-    as long as both sides stay open."""
-    base = target_base()
-    ws_local = web.WebSocketResponse(heartbeat=30)
-    await ws_local.prepare(request)
-
-    if not base:
-        await ws_local.close(code=1011, message=b"ComfyUI Proxy: remote URL not configured")
-        return ws_local
-
-    parts = urlsplit(base)
-    ws_scheme = "wss" if parts.scheme == "https" else "ws"
-    target_ws_url = urlunsplit((ws_scheme, parts.netloc, request.rel_url.path, request.rel_url.query_string, ""))
-
-    headers = copy_request_headers(request)
-    session = get_tracking_session()
-    timeout = get_timeout()
-
-    try:
-        async with session.ws_connect(
-            target_ws_url, headers=headers, timeout=timeout.total, heartbeat=30
-        ) as ws_remote:
-
-            async def local_to_remote():
-                async for msg in ws_local:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await ws_remote.send_str(msg.data)
-                    elif msg.type == aiohttp.WSMsgType.BINARY:
-                        await ws_remote.send_bytes(msg.data)
-                    elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                        break
-
-            async def remote_to_local():
-                async for msg in ws_remote:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        _inspect_ws_message_for_completion(msg.data)
-                        await ws_local.send_str(msg.data)
-                    elif msg.type == aiohttp.WSMsgType.BINARY:
-                        await ws_local.send_bytes(msg.data)
-                    elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                        break
-
-            t1 = asyncio.ensure_future(local_to_remote())
-            t2 = asyncio.ensure_future(remote_to_local())
-            _, pending = await asyncio.wait([t1, t2], return_when=asyncio.FIRST_COMPLETED)
-            for t in pending:
-                t.cancel()
-
-    except asyncio.TimeoutError:
-        logger.error("[ComfyUI Proxy] Timeout connecting websocket to remote GPU")
-        await ws_local.close(code=1011, message=b"ComfyUI Proxy: remote websocket connection timed out")
-    except aiohttp.ClientError as e:
-        logger.error(f"[ComfyUI Proxy] Websocket connection error: {e}")
-        await ws_local.close(code=1011, message=str(e).encode("utf-8", "ignore"))
-    except Exception as e:
-        logger.error(f"[ComfyUI Proxy] Unexpected websocket proxy error: {e}")
-        await ws_local.close(code=1011, message=str(e).encode("utf-8", "ignore"))
-
-    return ws_local

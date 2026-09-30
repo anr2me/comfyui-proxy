@@ -18,6 +18,10 @@ DEFAULT_CONFIG = {
     "remote_url": "",          # e.g. https://my-endpoint.runpod.net
     "timeout": 120,            # seconds; configurable in UI for slow cold boots
     "auth_key": "",            # optional bearer token sent to the remote
+    "post_completion_delay": 5,  # seconds to keep the progress relay open after
+                                  # a job finishes, so the UI's progress bar/log
+                                  # animations have time to reach 100% before we
+                                  # tear the shadow connection down
     "models_cache": None,      # dict of {"NodeName.param": [model, ...]} pulled once from remote
     "models_cache_url": None,  # remote_url the cache was pulled from (detects URL changes)
 }
