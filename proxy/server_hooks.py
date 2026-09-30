@@ -40,9 +40,23 @@ from . import state
 logger = logging.getLogger("ComfyUIProxy")
 
 ALWAYS_PROXY_EXACT = {"/prompt", "/interrupt", "/upload/image", "/upload/mask", "/free", "/queue"}
-ALWAYS_PROXY_PREFIXES = ("/history", "/view", "/viewvideo", "/api/jobs", "/api/crystools")
+# "/history", "/view", "/viewvideo" are core routes and get /api-alias handling below.
+# "/api/jobs", "/api/crystools" are their own real namespace (not aliases of a plain route).
+CORE_PROXY_PREFIXES = ("/history", "/view", "/viewvideo")
+EXTRA_PROXY_PREFIXES = ("/api/jobs", "/api/crystools")
 CONDITIONAL_ROUTES = {"/ws", "/internal/logs"}
 WAKE_TRIGGER_ROUTES = {"/prompt", "/queue"}
+
+
+def _strip_api_prefix(path: str) -> str:
+    """Newer ComfyUI core versions mirror many routes under '/api/' (e.g.
+    '/api/object_info' alongside '/object_info') for frontend/backend
+    versioning. Route-matching decisions use this canonical form so the
+    proxy behaves the same regardless of which alias the frontend calls;
+    actual forwarding still uses the real incoming path untouched."""
+    if path.startswith("/api/"):
+        return path[4:]
+    return path
 
 
 def _is_enabled() -> bool:
@@ -50,11 +64,14 @@ def _is_enabled() -> bool:
 
 
 def _should_proxy(path: str) -> bool:
-    if path in CONDITIONAL_ROUTES:
+    canonical = _strip_api_prefix(path)
+    if canonical in CONDITIONAL_ROUTES:
         return state.has_incomplete_job()
-    if path in ALWAYS_PROXY_EXACT:
+    if canonical in ALWAYS_PROXY_EXACT:
         return True
-    return any(path == p or path.startswith(p + "/") for p in ALWAYS_PROXY_PREFIXES)
+    if any(canonical == p or canonical.startswith(p + "/") for p in CORE_PROXY_PREFIXES):
+        return True
+    return any(path == p or path.startswith(p + "/") for p in EXTRA_PROXY_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -63,21 +80,21 @@ def _should_proxy(path: str) -> bool:
 # editing at all.
 # ---------------------------------------------------------------------------
 
-def _merge_remote_models(resp: web.StreamResponse, cache: dict) -> web.StreamResponse:
+def _merge_remote_models(resp: web.StreamResponse, cache: dict, context: str = "/object_info") -> web.StreamResponse:
     if not isinstance(resp, web.Response):
         logger.warning(
-            f"[ComfyUI Proxy] /object_info response is {type(resp).__name__}, not a plain "
+            f"[ComfyUI Proxy] {context} response is {type(resp).__name__}, not a plain "
             "web.Response (likely streamed by another middleware) — cannot patch model dropdowns."
         )
         return resp
     try:
         raw = resp.body
         if not raw:
-            logger.warning("[ComfyUI Proxy] /object_info response had no body to patch.")
+            logger.warning(f"[ComfyUI Proxy] {context} response had no body to patch.")
             return resp
         data = json.loads(raw)
     except Exception as e:
-        logger.warning(f"[ComfyUI Proxy] Could not parse local /object_info JSON to patch models: {e}")
+        logger.warning(f"[ComfyUI Proxy] Could not parse local {context} JSON to patch models: {e}")
         return resp
 
     changed = False
@@ -104,7 +121,7 @@ def _merge_remote_models(resp: web.StreamResponse, cache: dict) -> web.StreamRes
         )
         return resp
 
-    logger.info(f"[ComfyUI Proxy] Patched {matched_keys} model dropdown field(s) in /object_info from the remote cache.")
+    logger.info(f"[ComfyUI Proxy] Patched {matched_keys} model dropdown field(s) in {context} from the remote cache.")
     return web.Response(body=json.dumps(data).encode("utf-8"), status=resp.status, content_type="application/json")
 
 
@@ -150,9 +167,10 @@ async def _handle_prompt(request: web.Request) -> web.Response:
     headers = forwarder.copy_request_headers(request)
     session = forwarder.get_tracking_session()
     timeout = forwarder.get_timeout()
+    url = f"{base}{request.rel_url.path}"  # preserves /prompt vs /api/prompt as actually requested
 
     try:
-        async with session.post(f"{base}/prompt", data=body, headers=headers, timeout=timeout) as r:
+        async with session.post(url, data=body, headers=headers, timeout=timeout) as r:
             status = r.status
             data, text, err = await _read_tracking_response(r, "/prompt")
             if err:
@@ -214,43 +232,44 @@ async def _handle_queue(request: web.Request) -> web.Response:
 @web.middleware
 async def proxy_middleware(request: web.Request, handler):
     path = request.rel_url.path
+    canonical = _strip_api_prefix(path)
 
     # Local management API — never proxied.
     if path.startswith("/comfyui_proxy/"):
         return await handler(request)
 
     # Workflow editing stays local always; only patch the model dropdowns.
-    if path == "/object_info" or path.startswith("/object_info/"):
+    if canonical == "/object_info" or canonical.startswith("/object_info/"):
         resp = await handler(request)
         if not _is_enabled():
             logger.info(
-                f"[ComfyUI Proxy] Skipping /object_info model patch: proxy is "
+                f"[ComfyUI Proxy] Skipping {path} model patch: proxy is "
                 f"{'disabled' if not cfgmod.get('enabled') else 'missing a remote_url'}."
             )
             return resp
         cache = cfgmod.get("models_cache")
         if not cache:
-            logger.info("[ComfyUI Proxy] Skipping /object_info model patch: no cached model list yet.")
+            logger.info(f"[ComfyUI Proxy] Skipping {path} model patch: no cached model list yet.")
             return resp
-        return _merge_remote_models(resp, cache)
+        return _merge_remote_models(resp, cache, context=path)
 
     if not _is_enabled() or not _should_proxy(path):
         return await handler(request)
 
     # Wake-up gating: only /prompt, /queue, or an already-known incomplete
     # job (covers /ws, /internal/logs, /history, /view while a job runs).
-    if path in WAKE_TRIGGER_ROUTES:
+    if canonical in WAKE_TRIGGER_ROUTES:
         await forwarder.wake_remote_if_needed(f"request to {path}")
     elif state.has_incomplete_job():
         asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
 
-    if path == "/ws":
+    if canonical == "/ws":
         return await forwarder.forward_websocket(request)
-    if path == "/prompt" and request.method == "POST":
+    if canonical == "/prompt" and request.method == "POST":
         return await _handle_prompt(request)
-    if path == "/queue" and request.method == "GET":
+    if canonical == "/queue" and request.method == "GET":
         return await _handle_queue(request)
-    if path == "/interrupt":
+    if canonical == "/interrupt":
         state.clear_all()
         return await forwarder.forward_http(request)
 
