@@ -222,10 +222,17 @@ async def proxy_middleware(request: web.Request, handler):
     # Workflow editing stays local always; only patch the model dropdowns.
     if path == "/object_info" or path.startswith("/object_info/"):
         resp = await handler(request)
-        cache = cfgmod.get("models_cache") if _is_enabled() else None
-        if cache:
-            resp = _merge_remote_models(resp, cache)
-        return resp
+        if not _is_enabled():
+            logger.info(
+                f"[ComfyUI Proxy] Skipping /object_info model patch: proxy is "
+                f"{'disabled' if not cfgmod.get('enabled') else 'missing a remote_url'}."
+            )
+            return resp
+        cache = cfgmod.get("models_cache")
+        if not cache:
+            logger.info("[ComfyUI Proxy] Skipping /object_info model patch: no cached model list yet.")
+            return resp
+        return _merge_remote_models(resp, cache)
 
     if not _is_enabled() or not _should_proxy(path):
         return await handler(request)
