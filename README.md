@@ -35,8 +35,9 @@ encoding.
 | Route(s) | When |
 |---|---|
 | `/prompt`, `/queue` | Always, when the toggle is on. These also **wake** the remote (cold boot). |
-| `/interrupt`, `/upload/image`, `/upload/mask`, `/free` | Always, when the toggle is on. |
-| `/history*`, `/view*`, `/viewvideo*`, `/api/jobs*`, `/api/crystools*` | Always, when the toggle is on (partial/range content and streaming are preserved). |
+| `/upload/image`, `/upload/mask` | Always, when the toggle is on — preparing input for a job is a legitimate reason to wake the remote. |
+| `/interrupt`, `/free` | Only while a job is known incomplete or its shadow relay is live. Meaningless (and not worth a cold start) if nothing's running remotely. |
+| `/history*`, `/view*`, `/viewvideo*`, `/api/jobs*`, `/api/crystools*` | Only while a job is known incomplete or its shadow relay is live. **By design**, this means older remote job history/outputs won't show once the relay has closed — browsing alone is never allowed to cold-start the serverless instance. Partial/range content and streaming are preserved when it does proxy. |
 | `/ws`, `/internal/logs` | **Never** proxied as HTTP routes — see [Live progress](#live-progress-ws) below for how remote progress/logs actually reach the browser instead. |
 | `/object_info` | Never proxied — served locally so the graph editor keeps working offline, but combo/dropdown model fields are patched in-place with the cached remote model list (see below) so you can't pick a checkpoint that only exists on your machine. |
 | Everything else | Untouched, served locally as normal. |
@@ -46,11 +47,17 @@ encoding.
 The remote is only pinged (`GET /system_stats`) to trigger a cold boot in
 these cases:
 - a `/prompt` or `/queue` request comes in while the proxy is enabled,
+- an upload, `/interrupt`, `/free`, or browsing route above is actually
+  being forwarded (per the table, only while a job is incomplete or the
+  relay is live),
 - the shadow progress relay opens a connection ahead of a `/prompt` submission,
 - the model list needs its first-time pull after enabling or changing the URL.
 
-Each wake attempt logs `Initializing remote GPU...` through Python's
-`logging` module, visible in the ComfyUI console.
+Every one of these gets an `Initializing remote GPU...` log line **unless**
+a shadow relay is already known to be live (in which case the remote is
+provably awake already and logging would just be noise). This is
+unconditional on any actual outbound call, so a silent cold start should
+never happen without at least one log line explaining why.
 
 ## Model list caching
 

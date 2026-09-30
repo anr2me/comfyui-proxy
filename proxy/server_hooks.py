@@ -7,11 +7,16 @@ Registers, on import:
      and update settings — these are never proxied.
 
 Routing rules:
-  - /prompt, /interrupt, /upload/image, /upload/mask, /free, and any
-    /history*, /view*, /viewvideo*, /api/jobs*, /api/crystools* path are
-    always forwarded when the proxy is enabled (these are job/output related
-    and meaningless without the cloud GPU that actually ran the job).
-  - /queue is always forwarded when enabled (needed to know remote job state).
+  - /prompt, /queue, /upload/image, /upload/mask are always forwarded when
+    the proxy is enabled — these are the legitimate reasons to wake the
+    remote (queuing/checking a job, or preparing input for one).
+  - /interrupt, /free, and browsing/history routes (/history*, /view*,
+    /viewvideo*, /api/jobs*, /api/crystools*) are only forwarded while a job
+    is known to be incomplete or its shadow progress relay is live — they're
+    not worth a cold start on their own (e.g. opening the Media Assets panel
+    or the logs console while idle). Older remote job history simply won't
+    show once the relay has closed; this is a deliberate cost/idle-wake
+    tradeoff, not a bug.
   - /ws is NEVER proxied as an HTTP route: the browser's websocket connection
     is opened once at page load and can't be redirected after the fact.
     Instead, submitting /prompt opens a dedicated shadow websocket from the
@@ -45,11 +50,19 @@ from . import state
 
 logger = logging.getLogger("ComfyUIProxy")
 
-ALWAYS_PROXY_EXACT = {"/prompt", "/interrupt", "/upload/image", "/upload/mask", "/free", "/queue"}
+ALWAYS_PROXY_EXACT = {"/prompt", "/queue", "/upload/image", "/upload/mask"}
+# /interrupt and /free are only meaningful while something is actually
+# running on the remote — forwarding them while idle would just wake the
+# remote for no reason, so they're gated the same as the browsing routes.
+CONDITIONAL_EXACT = {"/interrupt", "/free"}
+# Browsing/history routes: legitimate to show remote data while a job is
+# incomplete or its relay is live, but NOT worth a cold start just to poll
+# job history or open a panel while idle (by explicit choice — older remote
+# job history simply won't show once the relay has closed).
 # "/history", "/view", "/viewvideo" are core routes and get /api-alias handling below.
 # "/api/jobs", "/api/crystools" are their own real namespace (not aliases of a plain route).
-CORE_PROXY_PREFIXES = ("/history", "/view", "/viewvideo")
-EXTRA_PROXY_PREFIXES = ("/api/jobs", "/api/crystools")
+CORE_CONDITIONAL_PREFIXES = ("/history", "/view", "/viewvideo")
+EXTRA_CONDITIONAL_PREFIXES = ("/api/jobs", "/api/crystools")
 WAKE_TRIGGER_ROUTES = {"/prompt", "/queue"}
 
 
@@ -68,13 +81,23 @@ def _is_enabled() -> bool:
     return bool(cfgmod.get("enabled", False)) and bool(cfgmod.get("remote_url"))
 
 
+def _remote_known_active() -> bool:
+    """True if we have a concrete reason to believe the remote is already
+    up — a tracked incomplete job, or a live shadow progress relay."""
+    return state.has_incomplete_job() or relay.has_active_relay()
+
+
 def _should_proxy(path: str) -> bool:
     canonical = _strip_api_prefix(path)
     if canonical in ALWAYS_PROXY_EXACT:
         return True
-    if any(canonical == p or canonical.startswith(p + "/") for p in CORE_PROXY_PREFIXES):
-        return True
-    return any(path == p or path.startswith(p + "/") for p in EXTRA_PROXY_PREFIXES)
+    if canonical in CONDITIONAL_EXACT:
+        return _remote_known_active()
+    if any(canonical == p or canonical.startswith(p + "/") for p in CORE_CONDITIONAL_PREFIXES):
+        return _remote_known_active()
+    if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
+        return _remote_known_active()
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -277,14 +300,15 @@ async def proxy_middleware(request: web.Request, handler):
     if not _is_enabled() or not _should_proxy(path):
         return await handler(request)
 
-    # Wake-up gating: only /prompt, /queue, or an already-known incomplete
-    # job (covers /history, /view, /api/jobs polling while a job runs) — and
-    # skip entirely whenever a shadow relay is already live, since that's
-    # direct proof the remote is awake and there's nothing to check.
+    # Every request reaching this point is about to actually go to the
+    # remote (routes that don't need it are already filtered out by
+    # _should_proxy above). Announce it unless a shadow relay already proves
+    # the remote is awake, so no outbound call to a possibly-sleeping
+    # instance is ever silent.
     if not relay.has_active_relay():
         if canonical in WAKE_TRIGGER_ROUTES:
             await forwarder.wake_remote_if_needed(f"request to {path}")
-        elif state.has_incomplete_job():
+        else:
             asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
 
     if canonical == "/prompt" and request.method == "POST":
