@@ -225,7 +225,19 @@ async def _run_relay(client_id: str):
                                     f"keeping progress stream open {delay:g}s more for final UI updates."
                                 )
                                 await asyncio.sleep(delay)
-                            break
+                            # Re-check: ensure_relay_ready() treats this task as
+                            # "already ready" for as long as it's alive, so a
+                            # prompt re-submitted during the delay above reuses
+                            # this same connection rather than opening a new
+                            # one. If that happened, a new job is now tracked
+                            # for this client — close the connection instead of
+                            # abandoning that job's progress tracking with it.
+                            if not state.has_incomplete_job_for_client(client_id):
+                                break
+                            logger.info(
+                                f"[ComfyUI Proxy] New job queued for client {client_id} during the grace "
+                                "period; keeping the progress stream open instead of closing it."
+                            )
 
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     await _inject_local(client_id, msg)
