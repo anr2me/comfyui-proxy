@@ -146,8 +146,10 @@ async def _read_tracking_response(r: aiohttp.ClientResponse, context: str):
             {
                 "error": (
                     f"ComfyUI Proxy: failed to decode the remote's response for {context} ({e}). "
-                    "If the remote/gateway compresses responses with brotli or zstd, install the "
-                    "'Brotli' and 'zstandard' packages in ComfyUI's Python environment."
+                    "This shouldn't normally happen since the proxy asks for gzip/deflate only on "
+                    "this call, but if your gateway ignores Accept-Encoding and forces br/zstd "
+                    "anyway, install 'Brotli' and/or 'backports.zstd' (Python < 3.14) in ComfyUI's "
+                    "Python environment."
                 )
             },
             status=502,
@@ -164,7 +166,7 @@ async def _read_tracking_response(r: aiohttp.ClientResponse, context: str):
 async def _handle_prompt(request: web.Request) -> web.Response:
     base = forwarder.target_base()
     body = await request.read()
-    headers = forwarder.copy_request_headers(request)
+    headers = forwarder.copy_request_headers(request, limit_encoding=True)
     session = forwarder.get_tracking_session()
     timeout = forwarder.get_timeout()
     url = f"{base}{request.rel_url.path}"  # preserves /prompt vs /api/prompt as actually requested
@@ -198,7 +200,7 @@ async def _handle_prompt(request: web.Request) -> web.Response:
 
 async def _handle_queue(request: web.Request) -> web.Response:
     base = forwarder.target_base()
-    headers = forwarder.copy_request_headers(request)
+    headers = forwarder.copy_request_headers(request, limit_encoding=True)
     session = forwarder.get_tracking_session()
     timeout = forwarder.get_timeout()
     url = f"{base}{request.rel_url.path}"

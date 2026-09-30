@@ -13,6 +13,7 @@ Two aiohttp ClientSessions are kept alive for the process lifetime:
 """
 
 import asyncio
+import importlib
 import json
 import logging
 from urllib.parse import urlsplit, urlunsplit
@@ -39,6 +40,53 @@ _COMPLETION_MSG_TYPES = {
 }
 
 
+_safe_accept_encoding = None
+
+
+def get_safe_accept_encoding() -> str:
+    """Accept-Encoding value to send on calls where we actually parse the
+    response body (/prompt, /queue, the model-list pull). Includes br/zstd
+    only if this Python environment can actually decode them, mirroring
+    aiohttp's own module checks, so we never ask the remote for something we
+    can't read back — but take advantage of those codecs when available
+    instead of always forcing the lowest common denominator. Computed once
+    and cached; installing a codec package after ComfyUI has started is
+    picked up on the next call as long as it lands on the same interpreter's
+    site-packages (no restart needed in the common case)."""
+    global _safe_accept_encoding
+    if _safe_accept_encoding is not None:
+        return _safe_accept_encoding
+
+    encodings = ["gzip", "deflate"]
+
+    has_brotli = False
+    for mod in ("brotli", "brotlicffi"):
+        try:
+            importlib.import_module(mod)
+            has_brotli = True
+            break
+        except ImportError:
+            continue
+    if has_brotli:
+        encodings.append("br")
+
+    has_zstd = False
+    for mod in ("compression.zstd", "backports.zstd"):
+        try:
+            importlib.import_module(mod)
+            has_zstd = True
+            break
+        except ImportError:
+            continue
+    if has_zstd:
+        encodings.append("zstd")
+
+    encodings.append("identity")
+    _safe_accept_encoding = ", ".join(encodings)
+    logger.info(f"[ComfyUI Proxy] Encodings this environment can decode: {_safe_accept_encoding}")
+    return _safe_accept_encoding
+
+
 def get_session():
     global _raw_session
     if _raw_session is None or _raw_session.closed:
@@ -63,12 +111,21 @@ def target_base() -> str:
     return (cfgmod.get("remote_url") or "").rstrip("/")
 
 
-def copy_request_headers(request: web.Request) -> dict:
+def copy_request_headers(request: web.Request, limit_encoding: bool = False) -> dict:
     headers = {}
     for k, v in request.headers.items():
         if k.lower() in HOP_BY_HOP:
             continue
         headers[k] = v
+    if limit_encoding:
+        # Calls that need to actually parse the response body (/prompt,
+        # /queue, the model-list pull) shouldn't ask the remote for an
+        # encoding we might not be able to decode. Uses br/zstd when the
+        # optional codec packages are installed, otherwise sticks to
+        # gzip/deflate. Streamed pass-through routes are unaffected and
+        # keep negotiating the browser's real Accept-Encoding, since those
+        # bytes are relayed untouched regardless of codec.
+        headers["Accept-Encoding"] = get_safe_accept_encoding()
     auth_key = cfgmod.get("auth_key")
     if auth_key:
         headers["Authorization"] = f"Bearer {auth_key}"
@@ -96,7 +153,7 @@ async def wake_remote_if_needed(reason: str = ""):
     try:
         session = get_tracking_session()
         timeout = get_timeout()
-        headers = {}
+        headers = {"Accept-Encoding": get_safe_accept_encoding()}
         auth_key = cfgmod.get("auth_key")
         if auth_key:
             headers["Authorization"] = f"Bearer {auth_key}"

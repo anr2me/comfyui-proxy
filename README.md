@@ -15,17 +15,19 @@ git clone https://github.com/anr2me/comfyui-proxy.git
 ```
 Only `aiohttp` is a hard dependency, which ComfyUI already ships with.
 
-Optionally, install (Brotli + zstandard) if your remote endpoint or its gateway might compress responses with `br` or `zstd`. 
+Optionally, install (Brotli + backports.zstd)
 ```bash
 cd comfyui-proxy
 pip install -r requirements.txt
 ```
-These are only used on the handful of routes the proxy actually reads and
-parses (`/prompt`, `/queue`, the wake-up ping, the one-time `/object_info`
-model pull) — if they're missing, those specific calls fail with a clear
-"install Brotli/zstandard" error instead of crashing, everything else
-(`/view`, `/viewvideo`, `/history`, etc.) is streamed byte-for-byte and never
-needs them regardless of encoding.
+To let the proxy negotiate those encodings on the calls it actually reads and
+parses (`/prompt`, `/queue`, the one-time `/object_info` model pull). It
+detects what's importable in ComfyUI's Python environment and only offers
+`br`/`zstd` on those calls when the matching package is present — otherwise
+it sticks to `gzip`/`deflate`, which is always safe and usually all you
+need. Everything streamed (`/view`, `/viewvideo`, `/history`, etc.) is
+relayed byte-for-byte and never needs to decode anything regardless of
+encoding.
 
 ## What gets proxied
 
@@ -101,10 +103,11 @@ This state is what gates `/ws` and `/internal/logs` forwarding.
 
 ## Notes / caveats
 
-- `/api/jobs` and `/api/crystools` are proxied as path prefixes as requested;
-  they're only meaningful if your remote actually exposes them (crystools is
-  a separate resource-monitor custom node — install it on both sides if you
-  want it working through the proxy).
+- `/api/jobs` and `/api/crystools` are proxied as their own path prefixes
+  (not treated as `/api`-aliases of some other route). `/api/jobs` is used
+  by the frontend's Media Assets panel to pull completed job/output info;
+  `/api/crystools` is a separate resource-monitor custom node — install it
+  on both sides if you want it working through the proxy.
 - The toggle defaults to **off**. Nothing is forwarded and no remote instance
   is contacted until you turn it on and set a URL.
 - Position of the floating panel is remembered per-browser via

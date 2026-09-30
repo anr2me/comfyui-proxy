@@ -27,7 +27,7 @@ async def refresh_models_cache(force: bool = False):
 
     session = forwarder.get_tracking_session()
     timeout = forwarder.get_timeout()
-    headers = {}
+    headers = {"Accept-Encoding": forwarder.get_safe_accept_encoding()}
     auth_key = cfgmod.get("auth_key")
     if auth_key:
         headers["Authorization"] = f"Bearer {auth_key}"

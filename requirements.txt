@@ -1,12 +1,14 @@
 # ComfyUI Proxy has no hard dependencies beyond aiohttp, which ComfyUI
-# already requires. These two are only needed if your remote GPU endpoint
-# (or a gateway/CDN in front of it) compresses responses with brotli or
-# zstd on the routes the proxy actually reads and parses: /prompt, /queue,
-# the wake-up ping, and the one-time /object_info model-list pull.
+# already requires. Install these to let the proxy negotiate br/zstd on the
+# calls where it actually parses the response body (/prompt, /queue, the
+# one-time /object_info model pull) — it auto-detects what's importable and
+# only offers an encoding on those calls if the matching package is present,
+# falling back to gzip/deflate (always safe) otherwise.
 #
-# Streamed routes (/history, /view, /viewvideo, /api/jobs, /api/crystools,
-# etc.) never need these — bytes are relayed as-is without decompression.
+#   pip install -r requirements.txt
 #
-# Install with: pip install -r requirements.txt
+# Note: aiohttp's zstd support uses Python 3.14's built-in `compression.zstd`
+# module, or `backports.zstd` on older Pythons — NOT the third-party
+# `zstandard` package.
 Brotli>=1.1.0
-zstandard>=0.22.0
+backports.zstd>=0.1.0; python_version < "3.14"
