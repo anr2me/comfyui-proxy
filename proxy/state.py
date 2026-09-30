@@ -47,6 +47,18 @@ def has_incomplete_job_for_client(client_id):
         )
 
 
+def mark_all_done_for_client(client_id):
+    """Force-clear every prompt tracked for this client, regardless of
+    whether we ever saw an explicit completion message for it. Used as a
+    safety net when the remote's queue_remaining count says nothing is left,
+    which catches jobs that errored out mid-execution without emitting a
+    clean execution_error/execution_interrupted message."""
+    with _lock:
+        for pid in [pid for pid, cid in _prompt_client.items() if cid == client_id]:
+            _incomplete_prompt_ids.discard(pid)
+            _prompt_client.pop(pid, None)
+
+
 def clear_all():
     with _lock:
         _incomplete_prompt_ids.clear()

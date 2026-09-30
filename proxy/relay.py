@@ -86,18 +86,11 @@ async def _inject_local(client_id: str, msg: aiohttp.WSMessage):
         logger.warning(f"[ComfyUI Proxy] Failed relaying remote ws message to local client {client_id}: {e}")
 
 
-def _completed_prompt_id(raw_text: str):
-    try:
-        msg = json.loads(raw_text)
-    except Exception:
-        return None
-    mtype = msg.get("type")
-    data = msg.get("data") or {}
-    if mtype == "executing" and data.get("node") is None:
-        return data.get("prompt_id")
-    if mtype in _COMPLETION_MSG_TYPES:
-        return data.get("prompt_id")
-    return None
+def has_active_relay() -> bool:
+    """True if any client currently has a live shadow connection to the
+    remote — i.e. we already know for a fact the remote is awake, so there's
+    no need to separately ping it to check readiness or log about it."""
+    return any(not t.done() for t in _relay_tasks.values())
 
 
 async def _subscribe_logs(base: str, headers: dict, timeout, client_id: str, enabled: bool):
@@ -170,12 +163,16 @@ async def _run_relay(client_id: str):
 
             async for msg in ws_remote:
                 if msg.type == aiohttp.WSMsgType.TEXT:
+                    try:
+                        parsed = json.loads(msg.data)
+                    except Exception:
+                        parsed = None
+
                     if not got_sid:
+                        # This very first message arrives right after connecting,
+                        # before /prompt has even been sent — its queue_remaining
+                        # is trivially 0 and must NOT be treated as "job done".
                         got_sid = True
-                        try:
-                            parsed = json.loads(msg.data)
-                        except Exception:
-                            parsed = None
                         sid = None
                         if isinstance(parsed, dict) and parsed.get("type") == "status":
                             sid = (parsed.get("data") or {}).get("sid")
@@ -188,17 +185,43 @@ async def _run_relay(client_id: str):
                             logger.info(f"[ComfyUI Proxy] Remote GPU progress stream ready for client {client_id}.")
                         asyncio.ensure_future(_subscribe_logs(base, headers, timeout, client_id, True))
                         _signal_ready(client_id)
+                        await _inject_local(client_id, msg)
+                        continue
 
                     await _inject_local(client_id, msg)
 
-                    finished_prompt_id = _completed_prompt_id(msg.data)
-                    if finished_prompt_id:
-                        state.mark_job_done(finished_prompt_id)
+                    finished = False
+                    finished_prompt_id = None
+                    if isinstance(parsed, dict):
+                        mtype = parsed.get("type")
+                        data = parsed.get("data") or {}
+                        if mtype == "executing" and data.get("node") is None:
+                            finished_prompt_id = data.get("prompt_id")
+                            finished = True
+                        elif mtype in _COMPLETION_MSG_TYPES:
+                            finished_prompt_id = data.get("prompt_id")
+                            finished = True
+                        elif mtype == "status":
+                            queue_remaining = ((data.get("status") or {}).get("exec_info") or {}).get("queue_remaining")
+                            if queue_remaining == 0:
+                                # Authoritative fallback: nothing left running or
+                                # queued on the remote at all, regardless of
+                                # whether a clean execution_success/error/
+                                # executing:null message was ever seen for this
+                                # specific job (e.g. it errored out server-side
+                                # mid-execution without one).
+                                finished = True
+
+                    if finished:
+                        if finished_prompt_id:
+                            state.mark_job_done(finished_prompt_id)
+                        else:
+                            state.clear_all()  # queue_remaining==0 is a global signal, not scoped to one prompt_id
                         if not state.has_incomplete_job_for_client(client_id):
                             delay = float(cfgmod.get("post_completion_delay", 5) or 0)
                             if delay > 0:
                                 logger.info(
-                                    f"[ComfyUI Proxy] Job {finished_prompt_id} finished on remote GPU; "
+                                    f"[ComfyUI Proxy] No jobs left on remote GPU for client {client_id}; "
                                     f"keeping progress stream open {delay:g}s more for final UI updates."
                                 )
                                 await asyncio.sleep(delay)

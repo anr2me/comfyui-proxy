@@ -278,11 +278,14 @@ async def proxy_middleware(request: web.Request, handler):
         return await handler(request)
 
     # Wake-up gating: only /prompt, /queue, or an already-known incomplete
-    # job (covers /history, /view while a job runs).
-    if canonical in WAKE_TRIGGER_ROUTES:
-        await forwarder.wake_remote_if_needed(f"request to {path}")
-    elif state.has_incomplete_job():
-        asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
+    # job (covers /history, /view, /api/jobs polling while a job runs) — and
+    # skip entirely whenever a shadow relay is already live, since that's
+    # direct proof the remote is awake and there's nothing to check.
+    if not relay.has_active_relay():
+        if canonical in WAKE_TRIGGER_ROUTES:
+            await forwarder.wake_remote_if_needed(f"request to {path}")
+        elif state.has_incomplete_job():
+            asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
 
     if canonical == "/prompt" and request.method == "POST":
         return await _handle_prompt(request)
