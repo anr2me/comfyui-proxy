@@ -4,8 +4,8 @@ Forwards job-related ComfyUI API/WebSocket traffic to a configurable cloud or
 serverless GPU endpoint, while node-graph editing (`/object_info`, static
 assets, settings, etc.) always stays local. A movable toggle pill in the
 corner of the UI lets you flip between local and remote GPU, and expands into
-a small form for the remote URL, timeout, post-completion delay, and an
-optional auth key.
+a small form for the remote URL, timeout, post-completion delay, job
+history cache size, and an optional auth key.
 
 ## Install
 
@@ -21,7 +21,7 @@ Optionally, install (Brotli + backports.zstd)
 cd comfyui-proxy
 pip install -r requirements.txt
 ```
-To let proxy negotiate those encodings on the calls it actually reads and
+To let the proxy negotiate those encodings on the calls it actually reads and
 parses (`/prompt`, `/queue`, the one-time `/object_info` model pull). It
 detects what's importable in ComfyUI's Python environment and only offers
 `br`/`zstd` on those calls when the matching package is present — otherwise
@@ -37,7 +37,8 @@ encoding.
 | `/prompt`, `/queue` | Always, when the toggle is on. These also **wake** the remote (cold boot). |
 | `/upload/image`, `/upload/mask` | Always, when the toggle is on — preparing input for a job is a legitimate reason to wake the remote. |
 | `/interrupt`, `/free` | Only while a job is known incomplete or its shadow relay is live. Meaningless (and not worth a cold start) if nothing's running remotely. |
-| `/history*`, `/view*`, `/viewvideo*`, `/api/jobs*`, `/api/crystools*` | Only while a job is known incomplete or its shadow relay is live. **By design**, this means older remote job history/outputs won't show once the relay has closed — browsing alone is never allowed to cold-start the serverless instance. Partial/range content and streaming are preserved when it does proxy. |
+| `/api/jobs*` | Fetched fresh (and **cached locally**) whenever a job is known incomplete or its relay is live; served from that cache otherwise, so browsing job history never wakes the remote. Falls through to the local handler only if there's no cached copy yet at all. |
+| `/history*`, `/view*`, `/viewvideo*`, `/api/crystools*` | Only while a job is known incomplete or its shadow relay is live. **By design**, this means older remote outputs won't show once the relay has closed — browsing alone is never allowed to cold-start the serverless instance. Partial/range content and streaming are preserved when it does proxy. |
 | `/ws`, `/internal/logs` | **Never** proxied as HTTP routes — see [Live progress](#live-progress-ws) below for how remote progress/logs actually reach the browser instead. |
 | `/object_info` | Never proxied — served locally so the graph editor keeps working offline, but combo/dropdown model fields are patched in-place with the cached remote model list (see below) so you can't pick a checkpoint that only exists on your machine. |
 | Everything else | Untouched, served locally as normal. |
@@ -98,6 +99,24 @@ remote, so literally proxying that route doesn't work. Instead:
 `/internal/logs` is likewise never proxied as an HTTP route for this same
 reason — remote log lines arrive through the shadow connection instead.
 
+## Job history caching (`/api/jobs`)
+
+`/api/jobs` (used by the Media Assets panel) is cached locally, keyed by its
+exact path + query string: whenever a job is known incomplete or the shadow
+relay is live, each request is fetched fresh from the remote and the result
+cached (configurable **Job history cache size**, default 64 distinct
+queries, oldest evicted first — including shrinking live if you lower it);
+whenever neither is true, the cached copy is served directly with no remote
+call at all — so browsing recent history while idle never wakes the remote. A cached
+response carries an `X-ComfyUI-Proxy-Cache: hit; age=<seconds>` header. If a
+live fetch fails (timeout, connection error, 5xx), the cache is used as a
+fallback before giving up. The cache is also cleared whenever the frontend
+clears job history (`POST /history` or `/api/history` with `"clear": true`
+in the body — detected regardless of whether that particular request ends
+up reaching the remote), or whenever the remote URL changes, and is
+in-memory only (cleared on a ComfyUI restart, same as the job-tracking
+state).
+
 ## Job tracking
 
 A prompt is considered "incomplete" from the moment `/prompt` returns a
@@ -133,8 +152,8 @@ when it's safe to close.
 - `GET /comfyui_proxy/config` — current settings (auth key is redacted, only
   a boolean `auth_key_set` is returned).
 - `POST /comfyui_proxy/config` — update `enabled`, `remote_url`, `timeout`,
-  `post_completion_delay`, `auth_key` (send an empty string for `auth_key`
-  to leave the stored key unchanged).
+  `post_completion_delay`, `jobs_cache_max_entries`, `auth_key` (send an
+  empty string for `auth_key` to leave the stored key unchanged).
 - `POST /comfyui_proxy/refresh_models` — force a fresh pull of the remote
   model list.
 - `POST /comfyui_proxy/reset_state` — forcibly cancels any tracked shadow

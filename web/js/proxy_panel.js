@@ -121,6 +121,7 @@ app.registerExtension({
         const urlInput = field("Remote GPU URL", "text", "https://your-endpoint.example.com");
         const timeoutInput = field("Timeout (seconds)", "number", "120");
         const delayInput = field("Post-completion delay (seconds)", "number", "5");
+        const jobsCacheInput = field("Job history cache size", "number", "64");
         const authInput = field("Auth Key (optional)", "password", "Bearer token");
 
         const statusLine = document.createElement("div");
@@ -206,6 +207,7 @@ app.registerExtension({
             urlInput.value = cfg.remote_url || "";
             timeoutInput.value = cfg.timeout || 120;
             delayInput.value = cfg.post_completion_delay ?? 5;
+            jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             statusLine.textContent = cfg.remote_url
                 ? cfg.has_models_cache
@@ -239,8 +241,10 @@ app.registerExtension({
                 remote_url: urlInput.value.trim(),
                 timeout: parseFloat(timeoutInput.value) || 120,
                 post_completion_delay: parseFloat(delayInput.value),
+                jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
             };
             if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = 5;
+            if (isNaN(patch.jobs_cache_max_entries) || patch.jobs_cache_max_entries < 1) patch.jobs_cache_max_entries = 64;
             if (authInput.value.trim()) {
                 patch.auth_key = authInput.value.trim();
             }

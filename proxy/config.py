@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
                                   # a job finishes, so the UI's progress bar/log
                                   # animations have time to reach 100% before we
                                   # tear the shadow connection down
+    "jobs_cache_max_entries": 64,  # max distinct /api/jobs path+query variants
+                                    # to keep cached locally (oldest evicted first)
     "models_cache": None,      # dict of {"NodeName.param": [model, ...]} pulled once from remote
     "models_cache_url": None,  # remote_url the cache was pulled from (detects URL changes)
 }

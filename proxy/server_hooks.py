@@ -11,12 +11,15 @@ Routing rules:
     the proxy is enabled — these are the legitimate reasons to wake the
     remote (queuing/checking a job, or preparing input for one).
   - /interrupt, /free, and browsing/history routes (/history*, /view*,
-    /viewvideo*, /api/jobs*, /api/crystools*) are only forwarded while a job
-    is known to be incomplete or its shadow progress relay is live — they're
-    not worth a cold start on their own (e.g. opening the Media Assets panel
-    or the logs console while idle). Older remote job history simply won't
-    show once the relay has closed; this is a deliberate cost/idle-wake
-    tradeoff, not a bug.
+    /viewvideo*, /api/crystools*) are only forwarded while a job is known to
+    be incomplete or its shadow progress relay is live — they're not worth a
+    cold start on their own (e.g. opening the logs console while idle).
+    Older remote job history simply won't show once the relay has closed;
+    this is a deliberate cost/idle-wake tradeoff, not a bug.
+  - /api/jobs is handled specially: fetched fresh (and cached) whenever the
+    remote is known active, served from a small local response cache
+    otherwise — so the Media Assets panel can still show recent history
+    while idle without ever waking the remote just to browse it.
   - /ws is NEVER proxied as an HTTP route: the browser's websocket connection
     is opened once at page load and can't be redirected after the fact.
     Instead, submitting /prompt opens a dedicated shadow websocket from the
@@ -37,6 +40,7 @@ Routing rules:
 import asyncio
 import json
 import logging
+import time
 
 import aiohttp
 from aiohttp import web
@@ -60,7 +64,9 @@ CONDITIONAL_EXACT = {"/interrupt", "/free"}
 # job history or open a panel while idle (by explicit choice — older remote
 # job history simply won't show once the relay has closed).
 # "/history", "/view", "/viewvideo" are core routes and get /api-alias handling below.
-# "/api/jobs", "/api/crystools" are their own real namespace (not aliases of a plain route).
+# "/api/crystools" is its own real namespace (not an alias of a plain route).
+# "/api/jobs" GET requests are handled separately below (with a local
+# response cache); this prefix only still matters here for any other method.
 CORE_CONDITIONAL_PREFIXES = ("/history", "/view", "/viewvideo")
 EXTRA_CONDITIONAL_PREFIXES = ("/api/jobs", "/api/crystools")
 WAKE_TRIGGER_ROUTES = {"/prompt", "/queue"}
@@ -98,6 +104,87 @@ def _should_proxy(path: str) -> bool:
     if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
         return _remote_known_active()
     return False
+
+
+# ---------------------------------------------------------------------------
+# /api/jobs response cache: fetched fresh (and cached) whenever the remote
+# is known active; served from cache otherwise, so browsing routes never
+# need to wake the remote just to show history that's already been seen.
+# ---------------------------------------------------------------------------
+
+_jobs_cache = {}  # "path?query" -> {"status": int, "data": Any, "text": str|None, "cached_at": float}
+
+
+def _jobs_cache_key(request: web.Request) -> str:
+    return f"{request.rel_url.path}?{request.rel_url.query_string}"
+
+
+def _jobs_cache_store(key: str, status: int, data, text):
+    max_entries = int(cfgmod.get("jobs_cache_max_entries", 64) or 64)
+    if key not in _jobs_cache:
+        while len(_jobs_cache) >= max_entries and _jobs_cache:
+            _jobs_cache.pop(next(iter(_jobs_cache)), None)  # evict oldest
+    _jobs_cache[key] = {"status": status, "data": data, "text": text, "cached_at": time.time()}
+
+
+def _jobs_cache_response(entry: dict) -> web.Response:
+    if entry["data"] is not None:
+        resp = web.json_response(entry["data"], status=entry["status"])
+    else:
+        resp = web.Response(text=entry["text"] or "", status=entry["status"])
+    resp.headers["X-ComfyUI-Proxy-Cache"] = f"hit; age={time.time() - entry['cached_at']:.0f}s"
+    return resp
+
+
+async def _handle_jobs(request: web.Request):
+    """GET /api/jobs(/*). Returns None (meaning 'fall through to the local
+    handler') only when there's truly nothing to serve — no cache and the
+    remote isn't worth waking just for this."""
+    key = _jobs_cache_key(request)
+
+    if not _remote_known_active():
+        entry = _jobs_cache.get(key)
+        return _jobs_cache_response(entry) if entry else None
+
+    base = forwarder.target_base()
+    headers = forwarder.copy_request_headers(request, limit_encoding=True)
+    session = forwarder.get_tracking_session()
+    timeout = forwarder.get_timeout()
+    url = f"{base}{request.rel_url.path}"
+    if request.rel_url.query_string:
+        url += f"?{request.rel_url.query_string}"
+
+    try:
+        async with session.get(url, headers=headers, timeout=timeout) as r:
+            status = r.status
+            data, text, err = await _read_tracking_response(r, request.rel_url.path)
+            if err:
+                entry = _jobs_cache.get(key)
+                if entry:
+                    logger.warning(f"[ComfyUI Proxy] {request.rel_url.path} fetch failed; serving cached copy.")
+                    return _jobs_cache_response(entry)
+                return err
+    except asyncio.TimeoutError:
+        logger.error(f"[ComfyUI Proxy] Timeout fetching {request.rel_url.path} from remote")
+        entry = _jobs_cache.get(key)
+        if entry:
+            logger.warning(f"[ComfyUI Proxy] {request.rel_url.path} timed out; serving cached copy.")
+            return _jobs_cache_response(entry)
+        return web.json_response({"error": "ComfyUI Proxy: remote GPU timed out"}, status=504)
+    except aiohttp.ClientError as e:
+        logger.error(f"[ComfyUI Proxy] Failed to fetch {request.rel_url.path}: {e}")
+        entry = _jobs_cache.get(key)
+        if entry:
+            logger.warning(f"[ComfyUI Proxy] {request.rel_url.path} failed; serving cached copy.")
+            return _jobs_cache_response(entry)
+        return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
+
+    if 200 <= status < 300:
+        _jobs_cache_store(key, status, data, text)
+
+    if data is not None:
+        return web.json_response(data, status=status)
+    return web.Response(text=text or "", status=status)
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +384,31 @@ async def proxy_middleware(request: web.Request, handler):
             return resp
         return _merge_remote_models(resp, cache, context=path)
 
+    # /api/jobs GET: cache-aware handling, independent of the general
+    # proxy/wake gating below, so cached history can be served even while
+    # deliberately not waking the remote.
+    if _is_enabled() and request.method == "GET" and (path == "/api/jobs" or path.startswith("/api/jobs/")):
+        resp = await _handle_jobs(request)
+        if resp is not None:
+            return resp
+        return await handler(request)  # nothing cached; let local take it
+
+    # POST /history (or /api/history) with {"clear": true} is the frontend
+    # clearing completed/failed job history — invalidate our local job-list
+    # cache too, regardless of whether this particular request ends up
+    # reaching the remote, so cleared entries don't keep showing up from it.
+    # request.read() caches its result, so peeking here doesn't disturb
+    # downstream handling (local or forwarded) reading the body again later.
+    if _is_enabled() and request.method == "POST" and (canonical == "/history" or canonical.startswith("/history/")):
+        try:
+            body = await request.read()
+            payload = json.loads(body) if body else {}
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("clear") is True and _jobs_cache:
+            _jobs_cache.clear()
+            logger.info(f"[ComfyUI Proxy] Cleared local job history cache ({path}, clear=true).")
+
     if not _is_enabled() or not _should_proxy(path):
         return await handler(request)
 
@@ -358,7 +470,7 @@ def setup():
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        allowed = {"enabled", "remote_url", "timeout", "auth_key", "post_completion_delay"}
+        allowed = {"enabled", "remote_url", "timeout", "auth_key", "post_completion_delay", "jobs_cache_max_entries"}
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
             clean["remote_url"] = (clean["remote_url"] or "").strip().rstrip("/")
@@ -372,6 +484,11 @@ def setup():
                 clean["post_completion_delay"] = max(0, float(clean["post_completion_delay"]))
             except (TypeError, ValueError):
                 clean.pop("post_completion_delay", None)
+        if "jobs_cache_max_entries" in clean:
+            try:
+                clean["jobs_cache_max_entries"] = max(1, int(clean["jobs_cache_max_entries"]))
+            except (TypeError, ValueError):
+                clean.pop("jobs_cache_max_entries", None)
         if "auth_key" in clean and not clean["auth_key"]:
             clean.pop("auth_key", None)  # blank means "leave unchanged"
 
@@ -386,6 +503,7 @@ def setup():
 
         if url_changed:
             state.clear_all()  # a switched endpoint invalidates any tracked remote job
+            _jobs_cache.clear()  # ...and any cached job history from the old one
 
         return web.json_response(_public_config())
 
