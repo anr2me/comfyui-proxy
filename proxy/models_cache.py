@@ -3,7 +3,7 @@ Pulls the remote's model list (checkpoints, loras, vaes, etc.) exactly once
 per remote_url, by fetching /object_info from the remote and extracting every
 combo (dropdown) input. Cached in config so later local /object_info
 responses can be patched to only show what the remote actually has,
-excluding models that only exist locally and would fail on the cloud GPU.
+excluding models that only exist locally and would fail on the remote GPU.
 """
 
 import logging

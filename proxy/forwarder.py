@@ -137,12 +137,31 @@ def get_timeout() -> aiohttp.ClientTimeout:
     return aiohttp.ClientTimeout(total=t, sock_connect=min(t, 30))
 
 
+_wake_lock = asyncio.Lock()
+_in_flight_wake = None  # shared asyncio.Task for any currently-in-progress wake ping
+
+
 async def wake_remote_if_needed(reason: str = ""):
     """Ping the remote once to trigger a cold boot, logging progress locally
-    via the standard logging module (surfaced through /internal/logs)."""
+    via the standard logging module. Concurrent callers (e.g. two
+    near-simultaneous requests both hitting a conditional route right as a
+    panel opens) share a single underlying ping instead of each firing their
+    own — otherwise the same near-instant wake gets logged and pinged twice
+    for what is really one event."""
+    global _in_flight_wake
     base = target_base()
     if not base:
         return
+
+    async with _wake_lock:
+        if _in_flight_wake is None or _in_flight_wake.done():
+            _in_flight_wake = asyncio.ensure_future(_do_wake_ping(base, reason))
+        task = _in_flight_wake
+
+    await task
+
+
+async def _do_wake_ping(base: str, reason: str):
     logger.info(f"[ComfyUI Proxy] Initializing remote GPU... ({reason})")
     try:
         session = get_tracking_session()

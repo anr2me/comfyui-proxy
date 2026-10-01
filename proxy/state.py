@@ -33,6 +33,19 @@ def mark_job_done(prompt_id=None):
             _prompt_client.clear()
 
 
+def clear_client(client_id):
+    """Stop tracking every incomplete job belonging to this client_id. Used
+    when a client's shadow relay ends for any reason — including failure —
+    so a job whose completion we can no longer observe doesn't stay
+    'incomplete' forever and keep forcing every future request into
+    'remote known active'."""
+    with _lock:
+        stale = [pid for pid, cid in _prompt_client.items() if cid == client_id]
+        for pid in stale:
+            _incomplete_prompt_ids.discard(pid)
+            _prompt_client.pop(pid, None)
+
+
 def has_incomplete_job():
     with _lock:
         return len(_incomplete_prompt_ids) > 0

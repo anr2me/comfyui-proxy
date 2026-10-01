@@ -102,7 +102,7 @@ def _should_proxy(path: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # /object_info patching: swap in the cached remote model list so users only
-# see models that actually exist on the cloud GPU, without touching local
+# see models that actually exist on the remote GPU, without touching local
 # editing at all.
 # ---------------------------------------------------------------------------
 
@@ -395,6 +395,17 @@ def setup():
             return web.json_response({"error": "remote URL not configured"}, status=400)
         cache = await models_cache.refresh_models_cache(force=True)
         return web.json_response({"count": len(cache) if cache else 0})
+
+    @routes.post("/comfyui_proxy/reset_state")
+    async def _reset_state(request):
+        cleared_jobs = len(state.incomplete_ids())
+        cancelled_relays = relay.cancel_all_relays()
+        state.clear_all()
+        logger.info(
+            f"[ComfyUI Proxy] Manual state reset: cleared {cleared_jobs} tracked job(s), "
+            f"cancelled {cancelled_relays} relay connection(s)."
+        )
+        return web.json_response({"cleared_jobs": cleared_jobs, "cancelled_relays": cancelled_relays})
 
     logger.info("[ComfyUI Proxy] Ready. Remote GPU forwarding is %s.", "enabled" if _is_enabled() else "disabled")
 

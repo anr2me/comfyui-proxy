@@ -3,7 +3,7 @@
 Forwards job-related ComfyUI API/WebSocket traffic to a configurable cloud or
 serverless GPU endpoint, while node-graph editing (`/object_info`, static
 assets, settings, etc.) always stays local. A movable toggle pill in the
-corner of the UI lets you flip between local and cloud GPU, and expands into
+corner of the UI lets you flip between local and remote GPU, and expands into
 a small form for the remote URL, timeout, post-completion delay, and an
 optional auth key.
 
@@ -21,7 +21,7 @@ Optionally, install (Brotli + backports.zstd)
 cd comfyui-proxy
 pip install -r requirements.txt
 ```
-To let the proxy negotiate those encodings on the calls it actually reads and
+To let proxy negotiate those encodings on the calls it actually reads and
 parses (`/prompt`, `/queue`, the one-time `/object_info` model pull). It
 detects what's importable in ComfyUI's Python environment and only offers
 `br`/`zstd` on those calls when the matching package is present — otherwise
@@ -137,6 +137,14 @@ when it's safe to close.
   to leave the stored key unchanged).
 - `POST /comfyui_proxy/refresh_models` — force a fresh pull of the remote
   model list.
+- `POST /comfyui_proxy/reset_state` — forcibly cancels any tracked shadow
+  relay connections and clears all tracked "incomplete job" state. Exposed
+  as the **Clear Stuck State** button in the panel; use it if the proxy
+  seems to think something's still running (e.g. after the remote died
+  mid-job in a way that never sent a clean completion message) without
+  having to restart ComfyUI. Returns immediately rather than waiting on the
+  cancelled connections' own cleanup, since that could itself hang against
+  an unreachable remote.
 
 ## Notes / caveats
 

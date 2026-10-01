@@ -65,7 +65,7 @@ app.registerExtension({
         });
 
         const label = document.createElement("span");
-        label.textContent = "Cloud GPU";
+        label.textContent = "Remote GPU";
         label.title = "Click to expand settings";
         label.style.cursor = "pointer";
 
@@ -152,6 +152,11 @@ app.registerExtension({
         btnRow.appendChild(saveBtn);
         btnRow.appendChild(refreshBtn);
         panel.appendChild(btnRow);
+
+        const resetBtn = mkButton("Clear Stuck State");
+        resetBtn.title = "Forgets any tracked job/connection the proxy thinks is still active, without restarting ComfyUI";
+        Object.assign(resetBtn.style, { width: "100%", marginTop: "6px" });
+        panel.appendChild(resetBtn);
 
         root.appendChild(panel);
         document.body.appendChild(root);
@@ -270,6 +275,21 @@ app.registerExtension({
                 console.error("[ComfyUI Proxy] Failed to refresh models", e);
             }
             refreshBtn.textContent = "Refresh Models";
+        });
+
+        resetBtn.addEventListener("click", async () => {
+            resetBtn.textContent = "Clearing...";
+            try {
+                const r = await fetch("/comfyui_proxy/reset_state", { method: "POST" });
+                const result = await r.json();
+                statusLine.textContent =
+                    `Cleared ${result.cleared_jobs} tracked job(s), ` +
+                    `cancelled ${result.cancelled_relays} connection(s).`;
+            } catch (e) {
+                console.error("[ComfyUI Proxy] Failed to clear stuck state", e);
+                statusLine.textContent = "Failed to clear stuck state — see console.";
+            }
+            resetBtn.textContent = "Clear Stuck State";
         });
 
         // --- Dragging the pill moves the whole panel ---

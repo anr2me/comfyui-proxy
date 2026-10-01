@@ -93,6 +93,24 @@ def has_active_relay() -> bool:
     return any(not t.done() for t in _relay_tasks.values())
 
 
+def cancel_all_relays() -> int:
+    """Forcibly stop tracking every active shadow relay immediately, and ask
+    the underlying tasks to cancel in the background. Used by the manual
+    'Clear stuck state' reset, so a relay wedged talking to a dead/
+    unreachable remote doesn't need a full ComfyUI restart to clear.
+    Returns immediately rather than waiting for the cancelled tasks' own
+    cleanup (unsubscribing logs, closing the socket), since that cleanup
+    could itself be slow — or hang — against an unreachable remote, which
+    would defeat the point of a manual reset."""
+    tasks = list(_relay_tasks.values())
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    _relay_tasks.clear()
+    _ready_events.clear()
+    return len(tasks)
+
+
 async def _subscribe_logs(base: str, headers: dict, timeout, client_id: str, enabled: bool):
     session = forwarder.get_tracking_session()
     try:
@@ -255,4 +273,14 @@ async def _run_relay(client_id: str):
         await _subscribe_logs(base, headers, timeout, client_id, False)
         _relay_tasks.pop(client_id, None)
         _ready_events.pop(client_id, None)
+        # Whatever jobs were tracked against this client stop being tracked
+        # the moment we can no longer observe them, regardless of why the
+        # relay ended (clean completion, connect timeout, ws error, ...).
+        # Without this, a relay that fails before ever seeing a completion
+        # message leaves its prompt_id "incomplete" forever, with nothing
+        # left alive to ever clear it — permanently forcing every future
+        # request into "remote known active" and silently re-waking the
+        # remote for routes that should only proxy while something's
+        # actually running.
+        state.clear_client(client_id)
         logger.info(f"[ComfyUI Proxy] Remote GPU progress stream closed for client {client_id}.")
