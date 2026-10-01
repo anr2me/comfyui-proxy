@@ -4,8 +4,9 @@ Forwards job-related ComfyUI API/WebSocket traffic to a configurable cloud or
 serverless GPU endpoint, while node-graph editing (`/object_info`, static
 assets, settings, etc.) always stays local. A movable toggle pill in the
 corner of the UI lets you flip between local and remote GPU, and expands into
-a small form for the remote URL, timeout, post-completion delay, job
-history cache size, and an optional auth key.
+a small form for the remote URL, timeout (default 300s — serverless cold
+boots can take a while when GPU capacity is scarce), post-completion delay,
+job history cache size, and an optional auth key.
 
 ## Install
 
@@ -117,6 +118,11 @@ up reaching the remote), or whenever the remote URL changes, and is
 in-memory only (cleared on a ComfyUI restart, same as the job-tracking
 state).
 
+The shadow relay also proactively refreshes every cached query the moment a
+job finishes, while its connection still proves the remote is awake — so
+the cache is already warm by the time the Media Assets panel actually gets
+opened later, after the relay (and that proof of liveness) is gone.
+
 ## Job tracking
 
 A prompt is considered "incomplete" from the moment `/prompt` returns a
@@ -164,6 +170,12 @@ when it's safe to close.
   having to restart ComfyUI. Returns immediately rather than waiting on the
   cancelled connections' own cleanup, since that could itself hang against
   an unreachable remote.
+- `POST /comfyui_proxy/reset_config` — resets `remote_url`, `timeout`,
+  `post_completion_delay`, `jobs_cache_max_entries`, and `auth_key` back to
+  their defaults (and disables the proxy), additionally clearing the job
+  history cache and any tracked state/relays. Exposed as the **Reset to
+  Defaults** button in the panel, with a confirmation prompt since it wipes
+  the saved URL and auth key.
 
 ## Notes / caveats
 

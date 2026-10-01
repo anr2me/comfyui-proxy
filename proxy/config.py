@@ -16,7 +16,9 @@ CONFIG_PATH = os.path.join(_PACKAGE_DIR, "proxy_config.json")
 DEFAULT_CONFIG = {
     "enabled": False,          # forwarder is OFF by default
     "remote_url": "",          # e.g. https://my-endpoint.runpod.net
-    "timeout": 120,            # seconds; configurable in UI for slow cold boots
+    "timeout": 300,            # seconds; configurable in UI — serverless cold
+                                # boots can take a long time when GPU capacity
+                                # is scarce, so this defaults high rather than low
     "auth_key": "",            # optional bearer token sent to the remote
     "post_completion_delay": 5,  # seconds to keep the progress relay open after
                                   # a job finishes, so the UI's progress bar/log
@@ -71,3 +73,8 @@ def update_config(patch: dict):
 
 def get(key, default=None):
     return load_config().get(key, default)
+
+
+def reset_to_defaults():
+    save_config(dict(DEFAULT_CONFIG))
+    return load_config()

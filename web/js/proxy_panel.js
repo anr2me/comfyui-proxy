@@ -119,7 +119,7 @@ app.registerExtension({
         }
 
         const urlInput = field("Remote GPU URL", "text", "https://your-endpoint.example.com");
-        const timeoutInput = field("Timeout (seconds)", "number", "120");
+        const timeoutInput = field("Timeout (seconds)", "number", "300");
         const delayInput = field("Post-completion delay (seconds)", "number", "5");
         const jobsCacheInput = field("Job history cache size", "number", "64");
         const authInput = field("Auth Key (optional)", "password", "Bearer token");
@@ -158,6 +158,13 @@ app.registerExtension({
         resetBtn.title = "Forgets any tracked job/connection the proxy thinks is still active, without restarting ComfyUI";
         Object.assign(resetBtn.style, { width: "100%", marginTop: "6px" });
         panel.appendChild(resetBtn);
+
+        const resetConfigBtn = mkButton("Reset to Defaults");
+        resetConfigBtn.title = "Resets URL, timeout, delay, cache size, and auth key back to their defaults";
+        Object.assign(resetConfigBtn.style, { width: "100%", marginTop: "6px", background: "#4a2a2a" });
+        resetConfigBtn.onmouseenter = () => (resetConfigBtn.style.background = "#5a3333");
+        resetConfigBtn.onmouseleave = () => (resetConfigBtn.style.background = "#4a2a2a");
+        panel.appendChild(resetConfigBtn);
 
         root.appendChild(panel);
         document.body.appendChild(root);
@@ -205,7 +212,7 @@ app.registerExtension({
             toggle.checked = !!cfg.enabled;
             dot.style.background = cfg.enabled ? "#4caf50" : "#888";
             urlInput.value = cfg.remote_url || "";
-            timeoutInput.value = cfg.timeout || 120;
+            timeoutInput.value = cfg.timeout || 300;
             delayInput.value = cfg.post_completion_delay ?? 5;
             jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
@@ -239,7 +246,7 @@ app.registerExtension({
         saveBtn.addEventListener("click", async () => {
             const patch = {
                 remote_url: urlInput.value.trim(),
-                timeout: parseFloat(timeoutInput.value) || 120,
+                timeout: parseFloat(timeoutInput.value) || 300,
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
             };
@@ -294,6 +301,23 @@ app.registerExtension({
                 statusLine.textContent = "Failed to clear stuck state — see console.";
             }
             resetBtn.textContent = "Clear Stuck State";
+        });
+
+        resetConfigBtn.addEventListener("click", async () => {
+            if (!confirm("Reset the remote URL, timeout, delay, cache size, and auth key back to their defaults? This also disables the proxy.")) {
+                return;
+            }
+            resetConfigBtn.textContent = "Resetting...";
+            try {
+                const cfg = await (await fetch("/comfyui_proxy/reset_config", { method: "POST" })).json();
+                refreshUI(cfg);
+                authInput.value = "";
+                statusLine.textContent = "Config reset to defaults.";
+            } catch (e) {
+                console.error("[ComfyUI Proxy] Failed to reset config", e);
+                statusLine.textContent = "Failed to reset config — see console.";
+            }
+            resetConfigBtn.textContent = "Reset to Defaults";
         });
 
         // --- Dragging the pill moves the whole panel ---

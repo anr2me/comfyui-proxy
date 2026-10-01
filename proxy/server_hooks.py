@@ -48,6 +48,7 @@ from server import PromptServer
 
 from . import config as cfgmod
 from . import forwarder
+from . import jobs_cache
 from . import models_cache
 from . import relay
 from . import state
@@ -107,84 +108,10 @@ def _should_proxy(path: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# /api/jobs response cache: fetched fresh (and cached) whenever the remote
-# is known active; served from cache otherwise, so browsing routes never
-# need to wake the remote just to show history that's already been seen.
+# /api/jobs response cache lives in its own module (jobs_cache.py), rather
+# than here, so relay.py can also import it (to proactively refresh it
+# before closing) without creating a server_hooks<->relay import cycle.
 # ---------------------------------------------------------------------------
-
-_jobs_cache = {}  # "path?query" -> {"status": int, "data": Any, "text": str|None, "cached_at": float}
-
-
-def _jobs_cache_key(request: web.Request) -> str:
-    return f"{request.rel_url.path}?{request.rel_url.query_string}"
-
-
-def _jobs_cache_store(key: str, status: int, data, text):
-    max_entries = int(cfgmod.get("jobs_cache_max_entries", 64) or 64)
-    if key not in _jobs_cache:
-        while len(_jobs_cache) >= max_entries and _jobs_cache:
-            _jobs_cache.pop(next(iter(_jobs_cache)), None)  # evict oldest
-    _jobs_cache[key] = {"status": status, "data": data, "text": text, "cached_at": time.time()}
-
-
-def _jobs_cache_response(entry: dict) -> web.Response:
-    if entry["data"] is not None:
-        resp = web.json_response(entry["data"], status=entry["status"])
-    else:
-        resp = web.Response(text=entry["text"] or "", status=entry["status"])
-    resp.headers["X-ComfyUI-Proxy-Cache"] = f"hit; age={time.time() - entry['cached_at']:.0f}s"
-    return resp
-
-
-async def _handle_jobs(request: web.Request):
-    """GET /api/jobs(/*). Returns None (meaning 'fall through to the local
-    handler') only when there's truly nothing to serve — no cache and the
-    remote isn't worth waking just for this."""
-    key = _jobs_cache_key(request)
-
-    if not _remote_known_active():
-        entry = _jobs_cache.get(key)
-        return _jobs_cache_response(entry) if entry else None
-
-    base = forwarder.target_base()
-    headers = forwarder.copy_request_headers(request, limit_encoding=True)
-    session = forwarder.get_tracking_session()
-    timeout = forwarder.get_timeout()
-    url = f"{base}{request.rel_url.path}"
-    if request.rel_url.query_string:
-        url += f"?{request.rel_url.query_string}"
-
-    try:
-        async with session.get(url, headers=headers, timeout=timeout) as r:
-            status = r.status
-            data, text, err = await _read_tracking_response(r, request.rel_url.path)
-            if err:
-                entry = _jobs_cache.get(key)
-                if entry:
-                    logger.warning(f"[ComfyUI Proxy] {request.rel_url.path} fetch failed; serving cached copy.")
-                    return _jobs_cache_response(entry)
-                return err
-    except asyncio.TimeoutError:
-        logger.error(f"[ComfyUI Proxy] Timeout fetching {request.rel_url.path} from remote")
-        entry = _jobs_cache.get(key)
-        if entry:
-            logger.warning(f"[ComfyUI Proxy] {request.rel_url.path} timed out; serving cached copy.")
-            return _jobs_cache_response(entry)
-        return web.json_response({"error": "ComfyUI Proxy: remote GPU timed out"}, status=504)
-    except aiohttp.ClientError as e:
-        logger.error(f"[ComfyUI Proxy] Failed to fetch {request.rel_url.path}: {e}")
-        entry = _jobs_cache.get(key)
-        if entry:
-            logger.warning(f"[ComfyUI Proxy] {request.rel_url.path} failed; serving cached copy.")
-            return _jobs_cache_response(entry)
-        return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
-
-    if 200 <= status < 300:
-        _jobs_cache_store(key, status, data, text)
-
-    if data is not None:
-        return web.json_response(data, status=status)
-    return web.Response(text=text or "", status=status)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +315,7 @@ async def proxy_middleware(request: web.Request, handler):
     # proxy/wake gating below, so cached history can be served even while
     # deliberately not waking the remote.
     if _is_enabled() and request.method == "GET" and (path == "/api/jobs" or path.startswith("/api/jobs/")):
-        resp = await _handle_jobs(request)
+        resp = await jobs_cache.handle_request(request, _remote_known_active())
         if resp is not None:
             return resp
         return await handler(request)  # nothing cached; let local take it
@@ -405,8 +332,8 @@ async def proxy_middleware(request: web.Request, handler):
             payload = json.loads(body) if body else {}
         except Exception:
             payload = {}
-        if isinstance(payload, dict) and payload.get("clear") is True and _jobs_cache:
-            _jobs_cache.clear()
+        if isinstance(payload, dict) and payload.get("clear") is True:
+            jobs_cache.clear()
             logger.info(f"[ComfyUI Proxy] Cleared local job history cache ({path}, clear=true).")
 
     if not _is_enabled() or not _should_proxy(path):
@@ -503,7 +430,7 @@ def setup():
 
         if url_changed:
             state.clear_all()  # a switched endpoint invalidates any tracked remote job
-            _jobs_cache.clear()  # ...and any cached job history from the old one
+            jobs_cache.clear()  # ...and any cached job history from the old one
 
         return web.json_response(_public_config())
 
@@ -524,6 +451,15 @@ def setup():
             f"cancelled {cancelled_relays} relay connection(s)."
         )
         return web.json_response({"cleared_jobs": cleared_jobs, "cancelled_relays": cancelled_relays})
+
+    @routes.post("/comfyui_proxy/reset_config")
+    async def _reset_config(request):
+        relay.cancel_all_relays()
+        state.clear_all()
+        jobs_cache.clear()
+        cfgmod.reset_to_defaults()
+        logger.info("[ComfyUI Proxy] Config reset to defaults.")
+        return web.json_response(_public_config())
 
     logger.info("[ComfyUI Proxy] Ready. Remote GPU forwarding is %s.", "enabled" if _is_enabled() else "disabled")
 
