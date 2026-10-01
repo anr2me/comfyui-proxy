@@ -121,7 +121,15 @@ state).
 The shadow relay also proactively refreshes every cached query the moment a
 job finishes, while its connection still proves the remote is awake — so
 the cache is already warm by the time the Media Assets panel actually gets
-opened later, after the relay (and that proof of liveness) is gone.
+opened later, after the relay (and that proof of liveness) is gone. This
+refresh also runs as a final, best-effort attempt whenever the relay closes
+for any other reason (the remote dropping the connection before a clean
+completion message, a timeout, ...), not just the clean-completion path.
+Each fetch — proactive or on-demand — logs `Retrieving remote job history
+(...) to cache...` first. If a panel request's exact query string isn't in
+the cache (e.g. its pagination/filter params differ from what was
+proactively refreshed), the most recently cached result is served instead
+of nothing, since a slightly mismatched history still beats an empty panel.
 
 ## Job tracking
 

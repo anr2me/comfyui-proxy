@@ -279,6 +279,15 @@ async def _run_relay(client_id: str):
         logger.warning(f"[ComfyUI Proxy] Unexpected error in remote progress stream for client {client_id}: {e}")
     finally:
         _signal_ready(client_id)  # never leave a waiting /prompt hanging on failure
+        # Guaranteed final refresh attempt, regardless of how the loop above
+        # exited (clean "finished" detection, the remote closing the socket
+        # on its own before ever sending a tidy completion message, a
+        # timeout, ...). The "finished" branch already does this on the
+        # clean path; this covers every other exit path too, so a dropped
+        # connection doesn't silently skip caching the last job's result.
+        # Best-effort: the remote may genuinely be gone by now, in which
+        # case this just fails quietly like any other refresh attempt would.
+        await jobs_cache.refresh_known(reason=f"client {client_id} relay closing")
         await _subscribe_logs(base, headers, timeout, client_id, False)
         _relay_tasks.pop(client_id, None)
         _ready_events.pop(client_id, None)

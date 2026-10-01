@@ -29,18 +29,27 @@ logger = logging.getLogger("ComfyUIProxy")
 PATH = "/api/jobs"
 
 _cache = {}  # query_string -> {"status": int, "data": Any, "text": str|None, "cached_at": float}
+_last_key = None  # most recently cached query string — used as a fallback
+                   # when the exact query the panel asks for doesn't match
+                   # anything cached (e.g. its pagination/filter params
+                   # differ from whatever was proactively refreshed), since
+                   # showing slightly-mismatched history beats showing none.
 
 
 def clear():
+    global _last_key
     _cache.clear()
+    _last_key = None
 
 
 def _store(query: str, status: int, data, text):
+    global _last_key
     max_entries = int(cfgmod.get("jobs_cache_max_entries", 64) or 64)
     if query not in _cache:
         while len(_cache) >= max_entries and _cache:
             _cache.pop(next(iter(_cache)), None)  # evict oldest
     _cache[query] = {"status": status, "data": data, "text": text, "cached_at": time.time()}
+    _last_key = query
 
 
 def _response(entry: dict) -> web.Response:
@@ -55,6 +64,7 @@ def _response(entry: dict) -> web.Response:
 async def _live_fetch(path: str, query: str):
     """GET path?query from the remote. Caches on success (2xx). Raises on
     transport/decode failure — callers decide what to do about that."""
+    logger.info(f"[ComfyUI Proxy] Retrieving remote job history ({path}{'?' + query if query else ''}) to cache...")
     base = forwarder.target_base()
     headers = {"Accept-Encoding": forwarder.get_safe_accept_encoding()}
     auth_key = cfgmod.get("auth_key")
@@ -90,7 +100,17 @@ async def handle_request(request: web.Request, remote_known_active: bool):
 
     if not remote_known_active:
         entry = _cache.get(query)
-        return _response(entry) if entry else None
+        if entry:
+            return _response(entry)
+        if _last_key is not None and _last_key != query:
+            fallback = _cache.get(_last_key)
+            if fallback:
+                logger.info(
+                    f"[ComfyUI Proxy] No cached copy for {path}?{query}; "
+                    f"serving the most recently cached job history instead."
+                )
+                return _response(fallback)
+        return None
 
     try:
         status, data, text = await _live_fetch(path, query)
