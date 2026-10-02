@@ -76,13 +76,20 @@ the file-only routes that don't need a GPU at all: `/upload/image`,
 target regardless, since they need the live GPU container's own state, not
 just files on the shared volume.
 
-The CPU target is only ever used while the GPU **isn't** already known
-active (no incomplete job, no live relay) — if the GPU is already up, these
-same routes go to the GPU target instead, so a request is never split
-across both containers and a single job never ends up waking both. There's
-no separate "wake" ping for the CPU target the way there is for the GPU
-one (see above): the actual upload/view/viewvideo request *is* what reaches
-it, cold-starting it transparently as part of that one request, and a line
+The CPU target is only ever used while a job **isn't actually still
+running** — if one is, these same routes go to the GPU target instead, so a
+request is never split across both containers and a single job never ends
+up waking both. This is checked against whether a job is genuinely
+incomplete, not merely whether the shadow relay happens to still be open:
+during the few-second grace period after a job finishes (kept open only so
+progress/log animations can finish, not because new GPU work is happening),
+the GPU container may already be winding down and start refusing new
+connections before that websocket actually closes — so new file-serving
+requests in that window correctly go to the CPU target (when configured)
+rather than risk hitting a GPU container on its way out. There's no
+separate "wake" ping for the CPU target the way there is for the GPU one
+(see above): the actual upload/view/viewvideo request *is* what reaches it,
+cold-starting it transparently as part of that one request, and a line
 like `Using remote CPU container for /view... (GPU not active)` is logged
 each time it's used — deliberately scoped to just those four route
 patterns, so routine polling of other routes never touches (or wakes) it.

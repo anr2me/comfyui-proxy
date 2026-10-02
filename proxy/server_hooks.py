@@ -105,15 +105,21 @@ def _is_cpu_eligible(canonical: str) -> bool:
 def _use_cpu_target(canonical: str) -> bool:
     """True if this request should go to the CPU-only target instead of the
     GPU one: only for file-only routes, only when a CPU URL is configured,
-    and only while the GPU isn't already known active — if the GPU is
-    already up there's no cost saving left to have, and routing some
-    requests to a second container while the first is busy would just risk
-    waking both instead of one."""
+    and only while a job isn't actually still running. Deliberately checks
+    state.has_incomplete_job() rather than the broader _remote_known_active()
+    (which also counts a live shadow relay): during the few-second grace
+    period after a job finishes — where the relay is intentionally kept
+    open only so progress/log animations can finish, not because new GPU
+    work is happening — the GPU container may already be winding down and
+    refusing new connections even though that websocket is still open, so
+    new file-serving requests in that window are better sent to the CPU
+    target (when configured) than forced onto a GPU container that's on its
+    way out anyway."""
     if not _is_cpu_eligible(canonical):
         return False
     if not cfgmod.get("remote_cpu_url"):
         return False
-    return not _remote_known_active()
+    return not state.has_incomplete_job()
 
 
 def _should_proxy(path: str) -> bool:
