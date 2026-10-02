@@ -125,11 +125,18 @@ opened later, after the relay (and that proof of liveness) is gone. This
 refresh also runs as a final, best-effort attempt whenever the relay closes
 for any other reason (the remote dropping the connection before a clean
 completion message, a timeout, ...), not just the clean-completion path.
-Each fetch — proactive or on-demand — logs `Retrieving remote job history
-(...) to cache...` first. If a panel request's exact query string isn't in
-the cache (e.g. its pagination/filter params differ from what was
-proactively refreshed), the most recently cached result is served instead
-of nothing, since a slightly mismatched history still beats an empty panel.
+Only this proactive refresh logs `Retrieving remote job history (...) to
+cache...` — a live on-demand fetch (serving an actual in-progress request
+while the remote is known active) doesn't, since the frontend can call
+`/api/jobs` often enough that logging every one of those would be noisy.
+
+If a panel request's exact query string isn't in the cache (e.g. its
+pagination params differ from what was proactively refreshed), the proxy
+looks for another cached entry with the same `status` filter (ComfyUI uses
+this to distinguish completed/failed job lists from in-progress/pending
+ones) before falling back to whatever was cached most recently overall —
+so a completed-jobs request can't end up silently "falling back" to an
+in-progress list (or vice versa) and look wrong instead of just stale.
 
 ## Job tracking
 

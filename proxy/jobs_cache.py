@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import time
+from urllib.parse import parse_qs
 
 import aiohttp
 from aiohttp import web
@@ -61,10 +62,35 @@ def _response(entry: dict) -> web.Response:
     return resp
 
 
+def _status_param(query: str):
+    """The 'status' query param (e.g. 'completed,failed,cancelled' vs
+    'in_progress,pending'), if present — ComfyUI's /api/jobs uses this to
+    request fundamentally different lists, so a fallback must match on it
+    rather than just grabbing whatever was cached most recently, or a
+    completed-jobs request could end up 'falling back' to an in-progress
+    list (or vice versa) and look empty/wrong instead of just stale."""
+    vals = parse_qs(query).get("status")
+    return vals[0] if vals else None
+
+
+def _find_fallback(query: str):
+    """Best available cached entry for a query with no exact match: prefer
+    the most recent entry sharing the same 'status' filter, if any; only
+    fall back to the single most-recently-cached entry overall when nothing
+    shares that filter (or neither query has one)."""
+    target_status = _status_param(query)
+    if target_status is not None:
+        for key in reversed(list(_cache.keys())):
+            if _status_param(key) == target_status:
+                return key, _cache[key]
+    if _last_key is not None:
+        return _last_key, _cache.get(_last_key)
+    return None, None
+
+
 async def _live_fetch(path: str, query: str):
     """GET path?query from the remote. Caches on success (2xx). Raises on
     transport/decode failure — callers decide what to do about that."""
-    logger.info(f"[ComfyUI Proxy] Retrieving remote job history ({path}{'?' + query if query else ''}) to cache...")
     base = forwarder.target_base()
     headers = {"Accept-Encoding": forwarder.get_safe_accept_encoding()}
     auth_key = cfgmod.get("auth_key")
@@ -102,14 +128,10 @@ async def handle_request(request: web.Request, remote_known_active: bool):
         entry = _cache.get(query)
         if entry:
             return _response(entry)
-        if _last_key is not None and _last_key != query:
-            fallback = _cache.get(_last_key)
-            if fallback:
-                logger.info(
-                    f"[ComfyUI Proxy] No cached copy for {path}?{query}; "
-                    f"serving the most recently cached job history instead."
-                )
-                return _response(fallback)
+        fallback_key, fallback = _find_fallback(query)
+        if fallback is not None and fallback_key != query:
+            logger.info(f"[ComfyUI Proxy] No exact cached copy for {path}?{query}; serving cached {path}?{fallback_key} instead.")
+            return _response(fallback)
         return None
 
     try:
@@ -151,6 +173,7 @@ async def refresh_known(reason: str = ""):
     queries = list(_cache.keys()) or [""]
     failures = 0
     for q in queries:
+        logger.info(f"[ComfyUI Proxy] Retrieving remote job history ({PATH}{'?' + q if q else ''}) to cache...")
         try:
             await _live_fetch(PATH, q)
         except Exception as e:
