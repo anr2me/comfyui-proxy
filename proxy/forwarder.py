@@ -217,40 +217,71 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
     body = await request.read() if request.can_read_body else None
 
     session = get_session()
-    try:
-        async with session.request(
-            request.method, target_url, headers=headers, data=body,
-            timeout=timeout, allow_redirects=False,
-        ) as remote_resp:
-            # Copy headers verbatim (this is what preserves gzip/br/zstd
-            # Content-Encoding and Content-Range for partial/streamed content).
-            resp_headers = {k: v for k, v in remote_resp.headers.items() if k.lower() not in HOP_BY_HOP}
+    max_attempts = 2  # one retry for a transient connection-pool race — see below
+    for attempt in range(1, max_attempts + 1):
+        headers_sent = False
+        try:
+            async with session.request(
+                request.method, target_url, headers=headers, data=body,
+                timeout=timeout, allow_redirects=False,
+            ) as remote_resp:
+                # Copy headers verbatim (this is what preserves gzip/br/zstd
+                # Content-Encoding and Content-Range for partial/streamed content).
+                resp_headers = {k: v for k, v in remote_resp.headers.items() if k.lower() not in HOP_BY_HOP}
 
-            if remote_resp.status >= 500:
-                logger.error(f"[ComfyUI Proxy] Remote {label} returned {remote_resp.status} for {request.method} {request.rel_url.path}")
+                if remote_resp.status >= 500:
+                    logger.error(f"[ComfyUI Proxy] Remote {label} returned {remote_resp.status} for {request.method} {request.rel_url.path}")
 
-            stream_resp = web.StreamResponse(status=remote_resp.status, headers=resp_headers)
-            await stream_resp.prepare(request)
-            async for chunk in remote_resp.content.iter_any():
-                await stream_resp.write(chunk)
-            await stream_resp.write_eof()
-            return stream_resp
+                stream_resp = web.StreamResponse(status=remote_resp.status, headers=resp_headers)
+                await stream_resp.prepare(request)
+                headers_sent = True  # past this point a retry is no longer safe: the
+                                      # browser has already received a response's headers
+                async for chunk in remote_resp.content.iter_any():
+                    await stream_resp.write(chunk)
+                await stream_resp.write_eof()
+                return stream_resp
 
-    except asyncio.TimeoutError:
-        logger.error(f"[ComfyUI Proxy] Timeout forwarding {request.method} {request.rel_url.path} to remote {label}")
-        return web.json_response(
-            {"error": f"ComfyUI Proxy: remote {label} timed out (increase the timeout in the proxy panel if it's cold-booting)"},
-            status=504,
-        )
-    except aiohttp.ClientConnectorError as e:
-        logger.error(f"[ComfyUI Proxy] Connection error reaching remote {label}: {e}")
-        return web.json_response({"error": f"ComfyUI Proxy: cannot reach remote {label}: {e}"}, status=502)
-    except aiohttp.ClientResponseError as e:
-        logger.error(f"[ComfyUI Proxy] Remote {label} responded with error: {e}")
-        return web.json_response({"error": f"ComfyUI Proxy: remote {label} error: {e.message}"}, status=e.status or 502)
-    except aiohttp.ClientError as e:
-        logger.error(f"[ComfyUI Proxy] Client error forwarding request to remote {label}: {e}")
-        return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
-    except (UnicodeDecodeError, LookupError) as e:
-        logger.error(f"[ComfyUI Proxy] Encoding error while forwarding to remote {label}: {e}")
-        return web.json_response({"error": "ComfyUI Proxy: encoding error while forwarding response"}, status=502)
+        except asyncio.TimeoutError:
+            logger.error(f"[ComfyUI Proxy] Timeout forwarding {request.method} {request.rel_url.path} to remote {label}")
+            return web.json_response(
+                {"error": f"ComfyUI Proxy: remote {label} timed out (increase the timeout in the proxy panel if it's cold-booting)"},
+                status=504,
+            )
+        except aiohttp.ClientConnectorError as e:
+            # Connection-establishment failures (DNS, refused, SSL handshake,
+            # ...) — not retried here; these are checked before ClientOSError
+            # below since ClientConnectorError is itself a subclass of it,
+            # and a brand new connection attempt failing outright is not the
+            # same transient, worth-retrying situation handled there.
+            logger.error(f"[ComfyUI Proxy] Connection error reaching remote {label}: {e}")
+            return web.json_response({"error": f"ComfyUI Proxy: cannot reach remote {label}: {e}"}, status=502)
+        except aiohttp.ClientOSError as e:
+            # Covers things like "Cannot write to closing transport" — a
+            # transient aiohttp connection-pool race where the pool hands
+            # out an existing, pooled connection the remote/gateway is
+            # already closing (distinct from ClientConnectorError above,
+            # which is a brand new connection attempt failing outright).
+            # Common during a burst of concurrent requests (e.g. many
+            # thumbnails loading at once) hitting a target that's still
+            # cold-starting. The connector discards the broken connection
+            # once this is raised, so a retry almost always gets a fresh,
+            # working one — but only while nothing has been sent to the
+            # browser yet.
+            if not headers_sent and attempt < max_attempts:
+                logger.warning(f"[ComfyUI Proxy] Transient connection error reaching remote {label} ({e}); retrying...")
+                continue
+            logger.error(f"[ComfyUI Proxy] Client error forwarding request to remote {label}: {e}")
+            return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
+        except aiohttp.ClientResponseError as e:
+            logger.error(f"[ComfyUI Proxy] Remote {label} responded with error: {e}")
+            return web.json_response({"error": f"ComfyUI Proxy: remote {label} error: {e.message}"}, status=e.status or 502)
+        except aiohttp.ClientError as e:
+            logger.error(f"[ComfyUI Proxy] Client error forwarding request to remote {label}: {e}")
+            return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
+        except (UnicodeDecodeError, LookupError) as e:
+            logger.error(f"[ComfyUI Proxy] Encoding error while forwarding to remote {label}: {e}")
+            return web.json_response({"error": "ComfyUI Proxy: encoding error while forwarding response"}, status=502)
+
+    # Unreachable in practice (every branch above returns), but keeps this
+    # function's contract honest if max_attempts is ever changed.
+    return web.json_response({"error": f"ComfyUI Proxy: failed to forward request to remote {label}"}, status=502)

@@ -204,6 +204,13 @@ when it's safe to close.
   timeout for slow cold boots.
 - The request timeout (in seconds) is configurable from the panel, since
   different serverless providers cold-boot at very different speeds.
+- A transient aiohttp connection-pool race (`ClientOSError`, e.g. "Cannot
+  write to closing transport" — common when a burst of concurrent requests,
+  like many thumbnails loading at once, hits a target that's still
+  cold-starting) is retried once automatically, as long as nothing has been
+  sent to the browser yet. A brand-new connection attempt failing outright
+  (`ClientConnectorError` — DNS failure, refused, ...) is not retried, since
+  that's a different, non-transient situation.
 
 ## Endpoints added for the UI panel (never proxied)
 
