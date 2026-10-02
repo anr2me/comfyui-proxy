@@ -237,14 +237,16 @@ async def _run_relay(client_id: str):
                         else:
                             state.clear_all()  # queue_remaining==0 is a global signal, not scoped to one prompt_id
                         if not state.has_incomplete_job_for_client(client_id):
-                            # Refresh the /api/jobs cache now, while this
-                            # connection is still open and therefore still
-                            # proof the remote is awake — otherwise the first
-                            # time the Media Assets panel gets opened after
-                            # this relay closes, it would see no cache and
-                            # (by design) no longer be allowed to wake the
-                            # remote just to browse, showing nothing.
-                            await jobs_cache.refresh_known(reason=f"client {client_id} finished")
+                            # No separate refresh here: while a job is known
+                            # incomplete, _remote_known_active() is already
+                            # True, so the frontend's own ordinary /api/jobs
+                            # polling keeps the cache warm via the normal
+                            # on-demand path — no need to proactively fetch
+                            # again right at this exact moment too. The one
+                            # refresh that actually matters (after the delay
+                            # below, right before this connection closes and
+                            # that proof-of-liveness goes away) happens once,
+                            # unconditionally, in the finally block.
                             delay = float(cfgmod.get("post_completion_delay", 5) or 0)
                             if delay > 0:
                                 logger.info(

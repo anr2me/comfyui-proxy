@@ -118,17 +118,22 @@ up reaching the remote), or whenever the remote URL changes, and is
 in-memory only (cleared on a ComfyUI restart, same as the job-tracking
 state).
 
-The shadow relay also proactively refreshes every cached query the moment a
-job finishes, while its connection still proves the remote is awake — so
-the cache is already warm by the time the Media Assets panel actually gets
-opened later, after the relay (and that proof of liveness) is gone. This
-refresh also runs as a final, best-effort attempt whenever the relay closes
-for any other reason (the remote dropping the connection before a clean
-completion message, a timeout, ...), not just the clean-completion path.
-Only this proactive refresh logs `Retrieving remote job history (...) to
-cache...` — a live on-demand fetch (serving an actual in-progress request
-while the remote is known active) doesn't, since the frontend can call
-`/api/jobs` often enough that logging every one of those would be noisy.
+While a job is known incomplete, the frontend's own ordinary `/api/jobs`
+polling already keeps the cache warm via the normal on-demand path (the
+remote is known active, so each of those requests is a live fetch, cached
+as a side effect) — no separate proactive refresh is needed during that
+window. The one proactive refresh that actually matters happens exactly
+once, unconditionally, in the shadow relay's cleanup: right after a job
+finishes (or the relay closes for any other reason — the remote dropping
+the connection before a clean completion message, a timeout, ...) but
+*before* actually closing the connection, while it still proves the remote
+is awake — so the cache is warm for every query variant it already knows
+about by the time the Media Assets panel gets opened later, after the relay
+(and that proof of liveness) is gone. Only this refresh logs `Retrieving
+remote job history (...) to cache...`, appearing between the `No jobs
+left...` and `...progress stream closed` log lines — ordinary on-demand
+fetches don't log anything extra, since the frontend can call `/api/jobs`
+often enough that logging every one of those would be noisy.
 
 If a panel request's exact query string isn't in the cache (e.g. its
 pagination params differ from what was proactively refreshed), the proxy
@@ -136,7 +141,10 @@ looks for another cached entry with the same `status` filter (ComfyUI uses
 this to distinguish completed/failed job lists from in-progress/pending
 ones) before falling back to whatever was cached most recently overall —
 so a completed-jobs request can't end up silently "falling back" to an
-in-progress list (or vice versa) and look wrong instead of just stale.
+in-progress list (or vice versa) and look wrong instead of just stale. This
+fallback is also common enough with routine polling that it's logged at
+debug level only, rather than the default; the response's
+`X-ComfyUI-Proxy-Cache` header shows it happened either way.
 
 ## Job tracking
 

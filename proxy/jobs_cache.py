@@ -130,7 +130,11 @@ async def handle_request(request: web.Request, remote_known_active: bool):
             return _response(entry)
         fallback_key, fallback = _find_fallback(query)
         if fallback is not None and fallback_key != query:
-            logger.info(f"[ComfyUI Proxy] No exact cached copy for {path}?{query}; serving cached {path}?{fallback_key} instead.")
+            # Routine and frequent (the frontend polls /api/jobs often) —
+            # debug-level only, so it doesn't spam the console by default.
+            # The served response's X-ComfyUI-Proxy-Cache header still shows
+            # this happened, for anyone who wants to check.
+            logger.debug(f"[ComfyUI Proxy] No exact cached copy for {path}?{query}; serving cached {path}?{fallback_key} instead.")
             return _response(fallback)
         return None
 
