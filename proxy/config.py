@@ -15,11 +15,17 @@ CONFIG_PATH = os.path.join(_PACKAGE_DIR, "proxy_config.json")
 
 DEFAULT_CONFIG = {
     "enabled": False,          # forwarder is OFF by default
-    "remote_url": "",          # e.g. https://my-endpoint.runpod.net
+    "remote_url": "",          # the GPU endpoint, e.g. https://my-endpoint.runpod.net
     "timeout": 300,            # seconds; configurable in UI — serverless cold
                                 # boots can take a long time when GPU capacity
                                 # is scarce, so this defaults high rather than low
-    "auth_key": "",            # optional bearer token sent to the remote
+    "auth_key": "",            # optional bearer token sent to the GPU endpoint
+    "remote_cpu_url": "",      # optional: a CPU-only container sharing the same
+                                # persistent volume as the GPU one, used instead
+                                # of it for file-only routes (uploads, /view,
+                                # /viewvideo) whenever the GPU isn't already
+                                # active, so those don't needlessly wake it
+    "remote_cpu_auth_key": "",  # optional bearer token sent to the CPU endpoint
     "post_completion_delay": 5,  # seconds to keep the progress relay open after
                                   # a job finishes, so the UI's progress bar/log
                                   # animations have time to reach 100% before we

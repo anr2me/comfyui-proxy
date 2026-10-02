@@ -4,9 +4,11 @@ Forwards job-related ComfyUI API/WebSocket traffic to a configurable cloud or
 serverless GPU endpoint, while node-graph editing (`/object_info`, static
 assets, settings, etc.) always stays local. A movable toggle pill in the
 corner of the UI lets you flip between local and remote GPU, and expands into
-a small form for the remote URL, timeout (default 300s — serverless cold
-boots can take a while when GPU capacity is scarce), post-completion delay,
-job history cache size, and an optional auth key.
+a small form for the remote GPU URL (+ its own optional auth key), timeout
+(default 300s — serverless cold boots can take a while when GPU capacity is
+scarce), post-completion delay, job history cache size, and an optional
+second **remote CPU URL** (+ its own optional auth key) — see
+[Remote CPU target](#remote-cpu-target-uploadsdownloadspreviews) below.
 
 ## Install
 
@@ -35,31 +37,58 @@ encoding.
 
 | Route(s) | When |
 |---|---|
-| `/prompt`, `/queue` | Always, when the toggle is on. These also **wake** the remote (cold boot). |
-| `/upload/image`, `/upload/mask` | Always, when the toggle is on — preparing input for a job is a legitimate reason to wake the remote. |
-| `/interrupt`, `/free` | Only while a job is known incomplete or its shadow relay is live. Meaningless (and not worth a cold start) if nothing's running remotely. |
-| `/api/jobs*` | Fetched fresh (and **cached locally**) whenever a job is known incomplete or its relay is live; served from that cache otherwise, so browsing job history never wakes the remote. Falls through to the local handler only if there's no cached copy yet at all. |
-| `/history*`, `/view*`, `/viewvideo*`, `/api/crystools*` | Only while a job is known incomplete or its shadow relay is live. **By design**, this means older remote outputs won't show once the relay has closed — browsing alone is never allowed to cold-start the serverless instance. Partial/range content and streaming are preserved when it does proxy. |
+| `/prompt`, `/queue` | Always, when the toggle is on. These also **wake the GPU** (cold boot) and always go to the GPU target, never the CPU one. |
+| `/upload/image`, `/upload/mask`, `/view*`, `/viewvideo*` | Always proxied (file-only, needs no GPU). Goes to the **remote CPU target** when one is configured and the GPU isn't already known active; otherwise goes to the GPU target as usual — see [Remote CPU target](#remote-cpu-target-uploadsdownloadspreviews). |
+| `/interrupt`, `/free` | Only while a job is known incomplete or its shadow relay is live. Meaningless (and not worth a cold start) if nothing's running remotely. Always the GPU target. |
+| `/api/jobs*` | Fetched fresh (and **cached locally**) whenever a job is known incomplete or its relay is live; served from that cache otherwise, so browsing job history never wakes the remote. Falls through to the local handler only if there's no cached copy yet at all. Always the GPU target (job/queue metadata isn't just files on the shared volume). |
+| `/history*`, `/api/crystools*` | Only while a job is known incomplete or its shadow relay is live. **By design**, this means older remote history won't show once the relay has closed — browsing alone is never allowed to cold-start the serverless instance. Always the GPU target. |
 | `/ws`, `/internal/logs` | **Never** proxied as HTTP routes — see [Live progress](#live-progress-ws) below for how remote progress/logs actually reach the browser instead. |
 | `/object_info` | Never proxied — served locally so the graph editor keeps working offline, but combo/dropdown model fields are patched in-place with the cached remote model list (see below) so you can't pick a checkpoint that only exists on your machine. |
 | Everything else | Untouched, served locally as normal. |
 
-## Waking the remote
+## Waking the remote GPU
 
-The remote is only pinged (`GET /system_stats`) to trigger a cold boot in
-these cases:
+The GPU target is only pinged (`GET /system_stats`) to trigger a cold boot
+in these cases:
 - a `/prompt` or `/queue` request comes in while the proxy is enabled,
-- an upload, `/interrupt`, `/free`, or browsing route above is actually
-  being forwarded (per the table, only while a job is incomplete or the
-  relay is live),
+- `/interrupt`, `/free`, `/history`, or `/api/crystools` is actually being
+  forwarded (per the table, only while a job is incomplete or the relay is live),
+- an upload/`/view`/`/viewvideo` request is being forwarded to the **GPU**
+  target specifically — i.e. no CPU target is configured, or the GPU is
+  already active anyway,
 - the shadow progress relay opens a connection ahead of a `/prompt` submission,
 - the model list needs its first-time pull after enabling or changing the URL.
 
 Every one of these gets an `Initializing remote GPU...` log line **unless**
 a shadow relay is already known to be live (in which case the remote is
 provably awake already and logging would just be noise). This is
-unconditional on any actual outbound call, so a silent cold start should
-never happen without at least one log line explaining why.
+unconditional on any actual outbound call to the GPU target, so a silent
+cold start should never happen without at least one log line explaining why.
+
+## Remote CPU target (uploads/downloads/previews)
+
+An optional second **Remote CPU URL** (+ its own optional auth key) can
+point at a cheaper CPU-only container that shares the same persistent
+volume as the GPU one. It's used, instead of the GPU target, for exactly
+the file-only routes that don't need a GPU at all: `/upload/image`,
+`/upload/mask`, `/view*`, `/viewvideo*` — nothing else. `/prompt`, `/queue`,
+`/interrupt`, `/free`, `/history`, and `/api/jobs` always go to the GPU
+target regardless, since they need the live GPU container's own state, not
+just files on the shared volume.
+
+The CPU target is only ever used while the GPU **isn't** already known
+active (no incomplete job, no live relay) — if the GPU is already up, these
+same routes go to the GPU target instead, so a request is never split
+across both containers and a single job never ends up waking both. There's
+no separate "wake" ping for the CPU target the way there is for the GPU
+one (see above): the actual upload/view/viewvideo request *is* what reaches
+it, cold-starting it transparently as part of that one request, and a line
+like `Using remote CPU container for /view... (GPU not active)` is logged
+each time it's used — deliberately scoped to just those four route
+patterns, so routine polling of other routes never touches (or wakes) it.
+
+If no CPU URL is configured, this entire feature is inactive and every
+route behaves exactly as if it didn't exist.
 
 ## Model list caching
 
@@ -178,11 +207,13 @@ when it's safe to close.
 
 ## Endpoints added for the UI panel (never proxied)
 
-- `GET /comfyui_proxy/config` — current settings (auth key is redacted, only
-  a boolean `auth_key_set` is returned).
+- `GET /comfyui_proxy/config` — current settings (both auth keys are
+  redacted, only booleans `auth_key_set` / `remote_cpu_auth_key_set` are
+  returned).
 - `POST /comfyui_proxy/config` — update `enabled`, `remote_url`, `timeout`,
-  `post_completion_delay`, `jobs_cache_max_entries`, `auth_key` (send an
-  empty string for `auth_key` to leave the stored key unchanged).
+  `post_completion_delay`, `jobs_cache_max_entries`, `auth_key`,
+  `remote_cpu_url`, `remote_cpu_auth_key` (send an empty string for either
+  auth key to leave the stored one unchanged).
 - `POST /comfyui_proxy/refresh_models` — force a fresh pull of the remote
   model list.
 - `POST /comfyui_proxy/reset_state` — forcibly cancels any tracked shadow
@@ -193,12 +224,12 @@ when it's safe to close.
   having to restart ComfyUI. Returns immediately rather than waiting on the
   cancelled connections' own cleanup, since that could itself hang against
   an unreachable remote.
-- `POST /comfyui_proxy/reset_config` — resets `remote_url`, `timeout`,
-  `post_completion_delay`, `jobs_cache_max_entries`, and `auth_key` back to
-  their defaults (and disables the proxy), additionally clearing the job
-  history cache and any tracked state/relays. Exposed as the **Reset to
-  Defaults** button in the panel, with a confirmation prompt since it wipes
-  the saved URL and auth key.
+- `POST /comfyui_proxy/reset_config` — resets `remote_url`, `remote_cpu_url`,
+  `timeout`, `post_completion_delay`, `jobs_cache_max_entries`, `auth_key`,
+  and `remote_cpu_auth_key` back to their defaults (and disables the proxy),
+  additionally clearing the job history cache and any tracked state/relays.
+  Exposed as the **Reset to Defaults** button in the panel, with a
+  confirmation prompt since it wipes both saved URLs and both auth keys.
 
 ## Notes / caveats
 

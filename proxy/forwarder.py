@@ -101,11 +101,19 @@ async def close_sessions():
             await s.close()
 
 
-def target_base() -> str:
-    return (cfgmod.get("remote_url") or "").rstrip("/")
+def target_base(use_cpu: bool = False) -> str:
+    """The GPU target by default; the optional CPU-only target (sharing the
+    same persistent volume, for file-only routes that don't need a GPU)
+    when use_cpu is True. Returns '' if that target isn't configured."""
+    key = "remote_cpu_url" if use_cpu else "remote_url"
+    return (cfgmod.get(key) or "").rstrip("/")
 
 
-def copy_request_headers(request: web.Request, limit_encoding: bool = False) -> dict:
+def _auth_key_for(use_cpu: bool = False):
+    return cfgmod.get("remote_cpu_auth_key" if use_cpu else "auth_key")
+
+
+def copy_request_headers(request: web.Request, limit_encoding: bool = False, use_cpu: bool = False) -> dict:
     headers = {}
     for k, v in request.headers.items():
         if k.lower() in HOP_BY_HOP:
@@ -120,7 +128,7 @@ def copy_request_headers(request: web.Request, limit_encoding: bool = False) -> 
         # keep negotiating the browser's real Accept-Encoding, since those
         # bytes are relayed untouched regardless of codec.
         headers["Accept-Encoding"] = get_safe_accept_encoding()
-    auth_key = cfgmod.get("auth_key")
+    auth_key = _auth_key_for(use_cpu)
     if auth_key:
         headers["Authorization"] = f"Bearer {auth_key}"
     return headers
@@ -138,67 +146,73 @@ def get_timeout() -> aiohttp.ClientTimeout:
 
 
 _wake_lock = asyncio.Lock()
-_in_flight_wake = None  # shared asyncio.Task for any currently-in-progress wake ping
+_in_flight_wake = {False: None, True: None}  # keyed by use_cpu -> shared asyncio.Task
 
 
-async def wake_remote_if_needed(reason: str = ""):
-    """Ping the remote once to trigger a cold boot, logging progress locally
+async def wake_remote_if_needed(reason: str = "", use_cpu: bool = False):
+    """Ping the target once to trigger a cold boot, logging progress locally
     via the standard logging module. Concurrent callers (e.g. two
     near-simultaneous requests both hitting a conditional route right as a
     panel opens) share a single underlying ping instead of each firing their
     own — otherwise the same near-instant wake gets logged and pinged twice
-    for what is really one event."""
-    global _in_flight_wake
-    base = target_base()
+    for what is really one event. GPU and CPU targets are coalesced
+    independently, since they're separate containers."""
+    base = target_base(use_cpu)
     if not base:
         return
 
     async with _wake_lock:
-        if _in_flight_wake is None or _in_flight_wake.done():
-            _in_flight_wake = asyncio.ensure_future(_do_wake_ping(base, reason))
-        task = _in_flight_wake
+        existing = _in_flight_wake[use_cpu]
+        if existing is None or existing.done():
+            existing = asyncio.ensure_future(_do_wake_ping(base, reason, use_cpu))
+            _in_flight_wake[use_cpu] = existing
+        task = existing
 
     await task
 
 
-async def _do_wake_ping(base: str, reason: str):
-    logger.info(f"[ComfyUI Proxy] Initializing remote GPU... ({reason})")
+async def _do_wake_ping(base: str, reason: str, use_cpu: bool = False):
+    label = "CPU" if use_cpu else "GPU"
+    logger.info(f"[ComfyUI Proxy] Initializing remote {label}... ({reason})")
     try:
         session = get_tracking_session()
         timeout = get_timeout()
         headers = {"Accept-Encoding": get_safe_accept_encoding()}
-        auth_key = cfgmod.get("auth_key")
+        auth_key = _auth_key_for(use_cpu)
         if auth_key:
             headers["Authorization"] = f"Bearer {auth_key}"
         async with session.get(f"{base}/system_stats", headers=headers, timeout=timeout) as resp:
             if resp.status < 500:
-                logger.info("[ComfyUI Proxy] Remote GPU is ready.")
+                logger.info(f"[ComfyUI Proxy] Remote {label} is ready.")
             else:
-                logger.warning(f"[ComfyUI Proxy] Remote GPU returned HTTP {resp.status} while waking up.")
+                logger.warning(f"[ComfyUI Proxy] Remote {label} returned HTTP {resp.status} while waking up.")
     except asyncio.TimeoutError:
         logger.warning(
-            "[ComfyUI Proxy] Timed out waking up remote GPU "
+            f"[ComfyUI Proxy] Timed out waking up remote {label} "
             "(cold boot may still be in progress; consider raising the timeout)."
         )
     except aiohttp.ClientError as e:
-        logger.warning(f"[ComfyUI Proxy] Error waking up remote GPU: {e}")
+        logger.warning(f"[ComfyUI Proxy] Error waking up remote {label}: {e}")
     except Exception as e:
-        logger.warning(f"[ComfyUI Proxy] Unexpected error waking up remote GPU: {e}")
+        logger.warning(f"[ComfyUI Proxy] Unexpected error waking up remote {label}: {e}")
 
 
-async def forward_http(request: web.Request) -> web.StreamResponse:
-    """Stream a single HTTP request/response through to the remote, preserving
-    status, headers (incl. Content-Encoding / Content-Range), and body as-is."""
-    base = target_base()
+async def forward_http(request: web.Request, use_cpu: bool = False) -> web.StreamResponse:
+    """Stream a single HTTP request/response through to the target (GPU by
+    default, or the optional CPU-only target when use_cpu is True),
+    preserving status, headers (incl. Content-Encoding / Content-Range), and
+    body as-is."""
+    label = "CPU" if use_cpu else "GPU"
+    base = target_base(use_cpu)
     if not base:
-        return web.json_response({"error": "ComfyUI Proxy: remote URL not configured"}, status=502)
+        return web.json_response({"error": f"ComfyUI Proxy: remote {label} URL not configured"}, status=502)
 
     parts = urlsplit(base)
     target_url = f"{parts.scheme}://{parts.netloc}{request.rel_url.path}"
     if request.rel_url.query_string:
         target_url += f"?{request.rel_url.query_string}"
 
-    headers = copy_request_headers(request)
+    headers = copy_request_headers(request, use_cpu=use_cpu)
     timeout = get_timeout()
     body = await request.read() if request.can_read_body else None
 
@@ -213,7 +227,7 @@ async def forward_http(request: web.Request) -> web.StreamResponse:
             resp_headers = {k: v for k, v in remote_resp.headers.items() if k.lower() not in HOP_BY_HOP}
 
             if remote_resp.status >= 500:
-                logger.error(f"[ComfyUI Proxy] Remote returned {remote_resp.status} for {request.method} {request.rel_url.path}")
+                logger.error(f"[ComfyUI Proxy] Remote {label} returned {remote_resp.status} for {request.method} {request.rel_url.path}")
 
             stream_resp = web.StreamResponse(status=remote_resp.status, headers=resp_headers)
             await stream_resp.prepare(request)
@@ -223,20 +237,20 @@ async def forward_http(request: web.Request) -> web.StreamResponse:
             return stream_resp
 
     except asyncio.TimeoutError:
-        logger.error(f"[ComfyUI Proxy] Timeout forwarding {request.method} {request.rel_url.path}")
+        logger.error(f"[ComfyUI Proxy] Timeout forwarding {request.method} {request.rel_url.path} to remote {label}")
         return web.json_response(
-            {"error": "ComfyUI Proxy: remote GPU timed out (increase the timeout in the proxy panel if it's cold-booting)"},
+            {"error": f"ComfyUI Proxy: remote {label} timed out (increase the timeout in the proxy panel if it's cold-booting)"},
             status=504,
         )
     except aiohttp.ClientConnectorError as e:
-        logger.error(f"[ComfyUI Proxy] Connection error reaching remote GPU: {e}")
-        return web.json_response({"error": f"ComfyUI Proxy: cannot reach remote GPU: {e}"}, status=502)
+        logger.error(f"[ComfyUI Proxy] Connection error reaching remote {label}: {e}")
+        return web.json_response({"error": f"ComfyUI Proxy: cannot reach remote {label}: {e}"}, status=502)
     except aiohttp.ClientResponseError as e:
-        logger.error(f"[ComfyUI Proxy] Remote responded with error: {e}")
-        return web.json_response({"error": f"ComfyUI Proxy: remote GPU error: {e.message}"}, status=e.status or 502)
+        logger.error(f"[ComfyUI Proxy] Remote {label} responded with error: {e}")
+        return web.json_response({"error": f"ComfyUI Proxy: remote {label} error: {e.message}"}, status=e.status or 502)
     except aiohttp.ClientError as e:
-        logger.error(f"[ComfyUI Proxy] Client error forwarding request: {e}")
+        logger.error(f"[ComfyUI Proxy] Client error forwarding request to remote {label}: {e}")
         return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
     except (UnicodeDecodeError, LookupError) as e:
-        logger.error(f"[ComfyUI Proxy] Encoding error while forwarding: {e}")
+        logger.error(f"[ComfyUI Proxy] Encoding error while forwarding to remote {label}: {e}")
         return web.json_response({"error": "ComfyUI Proxy: encoding error while forwarding response"}, status=502)

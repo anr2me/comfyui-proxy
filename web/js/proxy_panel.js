@@ -119,10 +119,12 @@ app.registerExtension({
         }
 
         const urlInput = field("Remote GPU URL", "text", "https://your-endpoint.example.com");
+        const cpuUrlInput = field("Remote CPU URL (optional)", "text", "https://your-cpu-endpoint.example.com");
         const timeoutInput = field("Timeout (seconds)", "number", "300");
         const delayInput = field("Post-completion delay (seconds)", "number", "5");
         const jobsCacheInput = field("Job history cache size", "number", "64");
-        const authInput = field("Auth Key (optional)", "password", "Bearer token");
+        const authInput = field("Remote GPU Auth Key (optional)", "password", "Bearer token");
+        const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
 
         const statusLine = document.createElement("div");
         Object.assign(statusLine.style, { marginBottom: "8px", opacity: "0.75", fontSize: "11px", lineHeight: "1.4" });
@@ -212,10 +214,12 @@ app.registerExtension({
             toggle.checked = !!cfg.enabled;
             dot.style.background = cfg.enabled ? "#4caf50" : "#888";
             urlInput.value = cfg.remote_url || "";
+            cpuUrlInput.value = cfg.remote_cpu_url || "";
             timeoutInput.value = cfg.timeout || 300;
             delayInput.value = cfg.post_completion_delay ?? 5;
             jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
+            cpuAuthInput.placeholder = cfg.remote_cpu_auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             statusLine.textContent = cfg.remote_url
                 ? cfg.has_models_cache
                     ? `Remote model list cached (${cfg.models_cache_count} field${cfg.models_cache_count === 1 ? "" : "s"}).`
@@ -246,6 +250,7 @@ app.registerExtension({
         saveBtn.addEventListener("click", async () => {
             const patch = {
                 remote_url: urlInput.value.trim(),
+                remote_cpu_url: cpuUrlInput.value.trim(),
                 timeout: parseFloat(timeoutInput.value) || 300,
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
@@ -255,11 +260,15 @@ app.registerExtension({
             if (authInput.value.trim()) {
                 patch.auth_key = authInput.value.trim();
             }
+            if (cpuAuthInput.value.trim()) {
+                patch.remote_cpu_auth_key = cpuAuthInput.value.trim();
+            }
             saveBtn.textContent = "Saving...";
             try {
                 const cfg = await postConfig(patch);
                 refreshUI(cfg);
                 authInput.value = "";
+                cpuAuthInput.value = "";
                 if (cfg.has_models_cache) {
                     const ok = await refreshFrontendComboLists();
                     if (!ok) {
@@ -304,7 +313,7 @@ app.registerExtension({
         });
 
         resetConfigBtn.addEventListener("click", async () => {
-            if (!confirm("Reset the remote URL, timeout, delay, cache size, and auth key back to their defaults? This also disables the proxy.")) {
+            if (!confirm("Reset both remote URLs, timeout, delay, cache size, and both auth keys back to their defaults? This also disables the proxy.")) {
                 return;
             }
             resetConfigBtn.textContent = "Resetting...";
@@ -312,6 +321,7 @@ app.registerExtension({
                 const cfg = await (await fetch("/comfyui_proxy/reset_config", { method: "POST" })).json();
                 refreshUI(cfg);
                 authInput.value = "";
+                cpuAuthInput.value = "";
                 statusLine.textContent = "Config reset to defaults.";
             } catch (e) {
                 console.error("[ComfyUI Proxy] Failed to reset config", e);

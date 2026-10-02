@@ -60,17 +60,19 @@ ALWAYS_PROXY_EXACT = {"/prompt", "/queue", "/upload/image", "/upload/mask"}
 # running on the remote — forwarding them while idle would just wake the
 # remote for no reason, so they're gated the same as the browsing routes.
 CONDITIONAL_EXACT = {"/interrupt", "/free"}
-# Browsing/history routes: legitimate to show remote data while a job is
-# incomplete or its relay is live, but NOT worth a cold start just to poll
-# job history or open a panel while idle (by explicit choice — older remote
-# job history simply won't show once the relay has closed).
-# "/history", "/view", "/viewvideo" are core routes and get /api-alias handling below.
+# /history is GPU-only (job/queue state lives with the live container, not
+# just on the shared volume) — gated purely by GPU activity.
+GPU_ONLY_CONDITIONAL_PREFIXES = ("/history",)
+# /view, /viewvideo, and uploads are file-only: readable/writable from a
+# CPU-only container sharing the same persistent volume, so they can also
+# proxy (to that CPU target) even while the GPU is idle, when one is
+# configured — see _use_cpu_target().
+CPU_ELIGIBLE_EXACT = {"/upload/image", "/upload/mask"}
+CPU_ELIGIBLE_PREFIXES = ("/view", "/viewvideo")
 # "/api/crystools" is its own real namespace (not an alias of a plain route).
 # "/api/jobs" GET requests are handled separately below (with a local
 # response cache); this prefix only still matters here for any other method.
-CORE_CONDITIONAL_PREFIXES = ("/history", "/view", "/viewvideo")
 EXTRA_CONDITIONAL_PREFIXES = ("/api/jobs", "/api/crystools")
-WAKE_TRIGGER_ROUTES = {"/prompt", "/queue"}
 
 
 def _strip_api_prefix(path: str) -> str:
@@ -89,9 +91,29 @@ def _is_enabled() -> bool:
 
 
 def _remote_known_active() -> bool:
-    """True if we have a concrete reason to believe the remote is already
-    up — a tracked incomplete job, or a live shadow progress relay."""
+    """True if we have a concrete reason to believe the GPU is already up —
+    a tracked incomplete job, or a live shadow progress relay."""
     return state.has_incomplete_job() or relay.has_active_relay()
+
+
+def _is_cpu_eligible(canonical: str) -> bool:
+    return canonical in CPU_ELIGIBLE_EXACT or any(
+        canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES
+    )
+
+
+def _use_cpu_target(canonical: str) -> bool:
+    """True if this request should go to the CPU-only target instead of the
+    GPU one: only for file-only routes, only when a CPU URL is configured,
+    and only while the GPU isn't already known active — if the GPU is
+    already up there's no cost saving left to have, and routing some
+    requests to a second container while the first is busy would just risk
+    waking both instead of one."""
+    if not _is_cpu_eligible(canonical):
+        return False
+    if not cfgmod.get("remote_cpu_url"):
+        return False
+    return not _remote_known_active()
 
 
 def _should_proxy(path: str) -> bool:
@@ -100,8 +122,13 @@ def _should_proxy(path: str) -> bool:
         return True
     if canonical in CONDITIONAL_EXACT:
         return _remote_known_active()
-    if any(canonical == p or canonical.startswith(p + "/") for p in CORE_CONDITIONAL_PREFIXES):
+    if any(canonical == p or canonical.startswith(p + "/") for p in GPU_ONLY_CONDITIONAL_PREFIXES):
         return _remote_known_active()
+    if _is_cpu_eligible(canonical):
+        # Still worth proxying even while the GPU is idle, as long as a CPU
+        # target is configured to actually serve it — _use_cpu_target()
+        # (checked again at dispatch time) decides which target that is.
+        return _remote_known_active() or bool(cfgmod.get("remote_cpu_url"))
     if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
         return _remote_known_active()
     return False
@@ -339,29 +366,30 @@ async def proxy_middleware(request: web.Request, handler):
     if not _is_enabled() or not _should_proxy(path):
         return await handler(request)
 
-    # Every request reaching this point is about to actually go to the
-    # remote (routes that don't need it are already filtered out by
-    # _should_proxy above). Announce it unless a shadow relay already proves
-    # the remote is awake, so no outbound call to a possibly-sleeping
-    # instance is ever silent.
-    if not relay.has_active_relay():
-        if canonical in WAKE_TRIGGER_ROUTES:
-            await forwarder.wake_remote_if_needed(f"request to {path}")
-        else:
-            asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
-
     if canonical == "/prompt" and request.method == "POST":
+        if not relay.has_active_relay():
+            await forwarder.wake_remote_if_needed(f"request to {path}")
         return await _handle_prompt(request)
     if canonical == "/queue" and request.method == "GET":
+        if not relay.has_active_relay():
+            await forwarder.wake_remote_if_needed(f"request to {path}")
         return await _handle_queue(request)
     if canonical == "/interrupt":
         state.clear_all()
+        if not relay.has_active_relay():
+            asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
         return await forwarder.forward_http(request)
 
     # Everything else (history, view, viewvideo, api/jobs, api/crystools,
     # uploads, free, ...): stream through untouched, preserving encoding,
-    # partial content, and status codes.
-    return await forwarder.forward_http(request)
+    # partial content, and status codes — to the CPU target when eligible
+    # and the GPU isn't already active, otherwise to the GPU as usual.
+    use_cpu = _use_cpu_target(canonical)
+    if use_cpu:
+        logger.info(f"[ComfyUI Proxy] Using remote CPU container for {path} (GPU not active).")
+    elif not relay.has_active_relay():
+        asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
+    return await forwarder.forward_http(request, use_cpu=use_cpu)
 
 
 # ---------------------------------------------------------------------------
@@ -374,8 +402,10 @@ def _public_config() -> dict:
     cfg["has_models_cache"] = bool(models_cache)
     cfg["models_cache_count"] = len(models_cache)
     cfg["auth_key_set"] = bool(cfg.get("auth_key"))
+    cfg["remote_cpu_auth_key_set"] = bool(cfg.get("remote_cpu_auth_key"))
     cfg.pop("models_cache", None)
     cfg.pop("auth_key", None)
+    cfg.pop("remote_cpu_auth_key", None)
     return cfg
 
 
@@ -397,10 +427,16 @@ def setup():
         except Exception:
             return web.json_response({"error": "invalid JSON body"}, status=400)
 
-        allowed = {"enabled", "remote_url", "timeout", "auth_key", "post_completion_delay", "jobs_cache_max_entries"}
+        allowed = {
+            "enabled", "remote_url", "timeout", "auth_key",
+            "remote_cpu_url", "remote_cpu_auth_key",
+            "post_completion_delay", "jobs_cache_max_entries",
+        }
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
             clean["remote_url"] = (clean["remote_url"] or "").strip().rstrip("/")
+        if "remote_cpu_url" in clean:
+            clean["remote_cpu_url"] = (clean["remote_cpu_url"] or "").strip().rstrip("/")
         if "timeout" in clean:
             try:
                 clean["timeout"] = max(5, float(clean["timeout"]))
@@ -418,6 +454,8 @@ def setup():
                 clean.pop("jobs_cache_max_entries", None)
         if "auth_key" in clean and not clean["auth_key"]:
             clean.pop("auth_key", None)  # blank means "leave unchanged"
+        if "remote_cpu_auth_key" in clean and not clean["remote_cpu_auth_key"]:
+            clean.pop("remote_cpu_auth_key", None)  # blank means "leave unchanged"
 
         prev = cfgmod.load_config()
         url_changed = "remote_url" in clean and clean["remote_url"] != prev.get("remote_url")
