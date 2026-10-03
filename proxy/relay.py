@@ -41,6 +41,7 @@ from server import PromptServer
 from . import config as cfgmod
 from . import forwarder
 from . import jobs_cache
+from . import keepalive
 from . import state
 
 logger = logging.getLogger("ComfyUIProxy")
@@ -164,6 +165,34 @@ def _signal_ready(client_id: str):
         ev.set()
 
 
+async def _extend_for_view_activity(client_id: str):
+    """Keep this relay's already-open websocket connection alive for as
+    long as /view or /viewvideo requests keep arriving for it, instead of
+    pinging separately: an open, pending connection is what actually counts
+    as "busy" to a scale-to-zero serverless platform, not a brief ping that
+    completes and is forgotten the instant it returns. Returns once there's
+    been no view activity for the configured idle timeout."""
+    timeout = keepalive.idle_timeout()
+    poll_interval = min(10.0, timeout)
+    logger.info(
+        f"[ComfyUI Proxy] Keeping progress stream open for client {client_id} while /view activity "
+        f"continues (idle timeout {timeout:g}s)..."
+    )
+    while True:
+        idle_for = keepalive.seconds_since_last_view()
+        remaining = timeout - idle_for
+        if remaining <= 0:
+            logger.info(
+                f"[ComfyUI Proxy] No /view activity for client {client_id} in the last {timeout:g}s; "
+                "ending keep-alive extension."
+            )
+            return
+        if not keepalive.enabled():
+            logger.info(f"[ComfyUI Proxy] GPU keep-alive disabled; ending extension for client {client_id}.")
+            return
+        await asyncio.sleep(min(poll_interval, remaining))
+
+
 async def _run_relay(client_id: str):
     base = forwarder.target_base()
     if not base:
@@ -261,12 +290,24 @@ async def _run_relay(client_id: str):
                             # one. If that happened, a new job is now tracked
                             # for this client — close the connection instead of
                             # abandoning that job's progress tracking with it.
-                            if not state.has_incomplete_job_for_client(client_id):
-                                break
-                            logger.info(
-                                f"[ComfyUI Proxy] New job queued for client {client_id} during the grace "
-                                "period; keeping the progress stream open instead of closing it."
-                            )
+                            if state.has_incomplete_job_for_client(client_id):
+                                logger.info(
+                                    f"[ComfyUI Proxy] New job queued for client {client_id} during the grace "
+                                    "period; keeping the progress stream open instead of closing it."
+                                )
+                            else:
+                                if keepalive.enabled():
+                                    await _extend_for_view_activity(client_id)
+                                # The extension above can run for a while —
+                                # a prompt could have been resubmitted during
+                                # it too, so check once more before closing.
+                                if state.has_incomplete_job_for_client(client_id):
+                                    logger.info(
+                                        f"[ComfyUI Proxy] New job queued for client {client_id} during the "
+                                        "keep-alive extension; keeping the progress stream open instead of closing it."
+                                    )
+                                else:
+                                    break
 
                 elif msg.type == aiohttp.WSMsgType.BINARY:
                     await _inject_local(client_id, msg)

@@ -461,7 +461,7 @@ def setup():
             "enabled", "remote_url", "timeout", "auth_key",
             "remote_cpu_url", "remote_cpu_auth_key",
             "post_completion_delay", "jobs_cache_max_entries",
-            "gpu_keepalive_enabled", "gpu_keepalive_interval", "gpu_keepalive_idle_timeout",
+            "gpu_keepalive_enabled", "gpu_keepalive_idle_timeout",
         }
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
@@ -485,11 +485,6 @@ def setup():
                 clean.pop("jobs_cache_max_entries", None)
         if "gpu_keepalive_enabled" in clean:
             clean["gpu_keepalive_enabled"] = bool(clean["gpu_keepalive_enabled"])
-        if "gpu_keepalive_interval" in clean:
-            try:
-                clean["gpu_keepalive_interval"] = max(5, float(clean["gpu_keepalive_interval"]))
-            except (TypeError, ValueError):
-                clean.pop("gpu_keepalive_interval", None)
         if "gpu_keepalive_idle_timeout" in clean:
             try:
                 clean["gpu_keepalive_idle_timeout"] = max(5, float(clean["gpu_keepalive_idle_timeout"]))

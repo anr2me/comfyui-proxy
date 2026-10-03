@@ -120,14 +120,20 @@ is gone, playback cuts off and that output stays unreachable until
 something wakes the GPU again.
 
 The **"Keep GPU warm for video/image viewing"** toggle (off by default —
-it has a real cost) addresses this directly: while enabled, every
-`/view`/`/viewvideo` request that's actually forwarded to the GPU target
-(i.e. no separate CPU target is in play) notes the activity, and a
-background loop pings the GPU every **keep-alive ping interval** seconds
-for as long as that activity is within the last **keep-alive idle timeout**
-seconds — then stops pinging on its own. It only ever runs while there's
-been recent `/view`/`/viewvideo` traffic; it's not a way to keep the GPU
-permanently warm.
+it has a real cost) addresses this directly — but *not* by pinging the GPU
+on a timer. A brief ping that completes and returns doesn't actually keep a
+scale-to-zero container warm: the instant it responds, the platform sees
+zero pending requests again and the container is just as eligible for
+teardown as if nothing had happened. What actually counts as "busy" is a
+connection that stays open and pending — and the shadow progress relay
+already has exactly that, in the form of its own websocket to the GPU. So
+instead, while this is enabled, every `/view`/`/viewvideo` request that's
+actually forwarded to the GPU target (i.e. no separate CPU target is in
+play) notes the activity, and the relay simply keeps that existing
+connection open for as long as such activity is within the last **view-
+activity idle timeout** seconds — then lets it close on its own. It only
+ever extends while there's been recent `/view`/`/viewvideo` traffic; it's
+not a way to keep the GPU permanently warm.
 
 This is the fallback for people without a separate CPU container who are
 willing to pay GPU cost to keep playback working — if you *do* have a
@@ -231,7 +237,20 @@ A prompt is considered "incomplete" from the moment `/prompt` returns a
 - `/interrupt` is called.
 
 This state (scoped per `client_id`) is what the shadow relay uses to decide
-when it's safe to close.
+when it's safe to close. If the relay's `finally` block ever runs without
+a `No jobs left on remote GPU for client ...` line having appeared first,
+that means the websocket ended some other way (a timeout, a connection
+error, or the remote closing it outright) rather than through a clean
+completion message — `state.clear_client()` still runs regardless, so
+tracking doesn't get stuck either way, but it's a sign the remote dropped
+the connection rather than the job cleanly finishing.
+
+Every wake check (`wake_remote_if_needed`) is also bounded by a hard
+ceiling (the configured timeout plus a margin) on top of its own internal
+timeout, specifically so that if a single wake attempt ever hung for any
+reason, it couldn't block every other request sharing that same
+coalescing slot — including, critically, the next `/prompt` submission —
+indefinitely.
 
 ## Streaming, encoding, and errors
 
@@ -264,13 +283,13 @@ when it's safe to close.
 - `POST /comfyui_proxy/config` — update `enabled`, `remote_url`, `timeout`,
   `post_completion_delay`, `jobs_cache_max_entries`, `auth_key`,
   `remote_cpu_url`, `remote_cpu_auth_key`, `gpu_keepalive_enabled`,
-  `gpu_keepalive_interval`, `gpu_keepalive_idle_timeout` (send an empty
-  string for either auth key to leave the stored one unchanged).
+  `gpu_keepalive_idle_timeout` (send an empty string for either auth key to
+  leave the stored one unchanged).
 - `POST /comfyui_proxy/refresh_models` — force a fresh pull of the remote
   model list.
 - `POST /comfyui_proxy/reset_state` — forcibly cancels any tracked shadow
-  relay connections, clears all tracked "incomplete job" state, and stops
-  the GPU keep-alive loop if it's running. Exposed as the **Clear Stuck
+  relay connections, clears all tracked "incomplete job" state, and ends
+  any in-progress GPU keep-alive extension. Exposed as the **Clear Stuck
   State** button in the panel; use it if the proxy seems to think
   something's still running (e.g. after the remote died mid-job in a way
   that never sent a clean completion message) without having to restart

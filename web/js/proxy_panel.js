@@ -149,12 +149,11 @@ app.registerExtension({
 
         const keepaliveInput = checkboxField(
             "Keep GPU warm for video/image viewing",
-            "Pings the GPU periodically while /view or /viewvideo requests keep arriving, so long video " +
-            "playback survives past the normal post-job grace window. Has a real cost — off by default, " +
-            "and only useful if you don't have a Remote CPU URL configured above."
+            "Keeps the existing progress connection to the GPU open while /view or /viewvideo requests " +
+            "keep arriving, so long video playback survives past the normal post-job grace window. Has a " +
+            "real cost — off by default, and only useful if you don't have a Remote CPU URL configured above."
         );
-        const keepaliveIntervalInput = field("  Keep-alive ping interval (seconds)", "number", "20");
-        const keepaliveIdleInput = field("  Keep-alive idle timeout (seconds)", "number", "60");
+        const keepaliveIdleInput = field("  View-activity idle timeout (seconds)", "number", "60");
 
         const statusLine = document.createElement("div");
         Object.assign(statusLine.style, { marginBottom: "8px", opacity: "0.75", fontSize: "11px", lineHeight: "1.4" });
@@ -249,7 +248,6 @@ app.registerExtension({
             delayInput.value = cfg.post_completion_delay ?? 5;
             jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
-            keepaliveIntervalInput.value = cfg.gpu_keepalive_interval ?? 20;
             keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 60;
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             cpuAuthInput.placeholder = cfg.remote_cpu_auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
@@ -288,12 +286,10 @@ app.registerExtension({
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
                 gpu_keepalive_enabled: keepaliveInput.checked,
-                gpu_keepalive_interval: parseFloat(keepaliveIntervalInput.value),
                 gpu_keepalive_idle_timeout: parseFloat(keepaliveIdleInput.value),
             };
             if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = 5;
             if (isNaN(patch.jobs_cache_max_entries) || patch.jobs_cache_max_entries < 1) patch.jobs_cache_max_entries = 64;
-            if (isNaN(patch.gpu_keepalive_interval) || patch.gpu_keepalive_interval < 5) patch.gpu_keepalive_interval = 20;
             if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = 60;
             if (authInput.value.trim()) {
                 patch.auth_key = authInput.value.trim();

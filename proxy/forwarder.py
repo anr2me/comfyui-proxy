@@ -168,7 +168,18 @@ async def wake_remote_if_needed(reason: str = "", use_cpu: bool = False):
             _in_flight_wake[use_cpu] = existing
         task = existing
 
-    await task
+    # Hard ceiling, defense in depth: _do_wake_ping() already bounds itself
+    # with get_timeout(), but since every caller of this shared slot would
+    # otherwise block on it together, a single edge case where that internal
+    # bound doesn't trigger as expected would hang every future request that
+    # needs this target — including, critically, the next /prompt
+    # submission. asyncio.shield keeps the underlying ping running (and its
+    # own timeout/cleanup intact) even if THIS caller gives up waiting.
+    ceiling = get_timeout().total + 30
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=ceiling)
+    except asyncio.TimeoutError:
+        logger.warning(f"[ComfyUI Proxy] Wake check for remote {'CPU' if use_cpu else 'GPU'} exceeded {ceiling:g}s; continuing without waiting further.")
 
 
 async def _do_wake_ping(base: str, reason: str, use_cpu: bool = False):
