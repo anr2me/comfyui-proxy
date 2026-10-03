@@ -118,6 +118,27 @@ app.registerExtension({
             return inp;
         }
 
+        function checkboxField(labelText, title) {
+            const wrap = document.createElement("div");
+            Object.assign(wrap.style, { display: "flex", alignItems: "center", gap: "6px", marginBottom: "8px" });
+            const inp = document.createElement("input");
+            inp.type = "checkbox";
+            const l = document.createElement("label");
+            l.textContent = labelText;
+            Object.assign(l.style, { opacity: "0.9", cursor: "pointer" });
+            if (title) {
+                wrap.title = title;
+            }
+            l.addEventListener("click", () => {
+                inp.checked = !inp.checked;
+                inp.dispatchEvent(new Event("change"));
+            });
+            wrap.appendChild(inp);
+            wrap.appendChild(l);
+            panel.appendChild(wrap);
+            return inp;
+        }
+
         const urlInput = field("Remote GPU URL", "text", "https://your-endpoint.example.com");
         const cpuUrlInput = field("Remote CPU URL (optional)", "text", "https://your-cpu-endpoint.example.com");
         const timeoutInput = field("Timeout (seconds)", "number", "300");
@@ -125,6 +146,15 @@ app.registerExtension({
         const jobsCacheInput = field("Job history cache size", "number", "64");
         const authInput = field("Remote GPU Auth Key (optional)", "password", "Bearer token");
         const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
+
+        const keepaliveInput = checkboxField(
+            "Keep GPU warm for video/image viewing",
+            "Pings the GPU periodically while /view or /viewvideo requests keep arriving, so long video " +
+            "playback survives past the normal post-job grace window. Has a real cost — off by default, " +
+            "and only useful if you don't have a Remote CPU URL configured above."
+        );
+        const keepaliveIntervalInput = field("  Keep-alive ping interval (seconds)", "number", "20");
+        const keepaliveIdleInput = field("  Keep-alive idle timeout (seconds)", "number", "60");
 
         const statusLine = document.createElement("div");
         Object.assign(statusLine.style, { marginBottom: "8px", opacity: "0.75", fontSize: "11px", lineHeight: "1.4" });
@@ -218,6 +248,9 @@ app.registerExtension({
             timeoutInput.value = cfg.timeout || 300;
             delayInput.value = cfg.post_completion_delay ?? 5;
             jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
+            keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
+            keepaliveIntervalInput.value = cfg.gpu_keepalive_interval ?? 20;
+            keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 60;
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             cpuAuthInput.placeholder = cfg.remote_cpu_auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             statusLine.textContent = cfg.remote_url
@@ -254,9 +287,14 @@ app.registerExtension({
                 timeout: parseFloat(timeoutInput.value) || 300,
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
+                gpu_keepalive_enabled: keepaliveInput.checked,
+                gpu_keepalive_interval: parseFloat(keepaliveIntervalInput.value),
+                gpu_keepalive_idle_timeout: parseFloat(keepaliveIdleInput.value),
             };
             if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = 5;
             if (isNaN(patch.jobs_cache_max_entries) || patch.jobs_cache_max_entries < 1) patch.jobs_cache_max_entries = 64;
+            if (isNaN(patch.gpu_keepalive_interval) || patch.gpu_keepalive_interval < 5) patch.gpu_keepalive_interval = 20;
+            if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = 60;
             if (authInput.value.trim()) {
                 patch.auth_key = authInput.value.trim();
             }
@@ -313,7 +351,7 @@ app.registerExtension({
         });
 
         resetConfigBtn.addEventListener("click", async () => {
-            if (!confirm("Reset both remote URLs, timeout, delay, cache size, and both auth keys back to their defaults? This also disables the proxy.")) {
+            if (!confirm("Reset both remote URLs, timeout, delay, cache size, keep-alive settings, and both auth keys back to their defaults? This also disables the proxy.")) {
                 return;
             }
             resetConfigBtn.textContent = "Resetting...";

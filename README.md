@@ -6,9 +6,11 @@ assets, settings, etc.) always stays local. A movable toggle pill in the
 corner of the UI lets you flip between local and remote GPU, and expands into
 a small form for the remote GPU URL (+ its own optional auth key), timeout
 (default 300s — serverless cold boots can take a while when GPU capacity is
-scarce), post-completion delay, job history cache size, and an optional
-second **remote CPU URL** (+ its own optional auth key) — see
-[Remote CPU target](#remote-cpu-target-uploadsdownloadspreviews) below.
+scarce), post-completion delay, job history cache size, an optional second
+**remote CPU URL** (+ its own optional auth key — see
+[Remote CPU target](#remote-cpu-target-uploadsdownloadspreviews) below), and
+an opt-in **GPU keep-alive** for long video playback without one — see
+[GPU keep-alive](#gpu-keep-alive-for-long-videoimage-viewing-opt-in) below.
 
 ## Install
 
@@ -96,6 +98,41 @@ patterns, so routine polling of other routes never touches (or wakes) it.
 
 If no CPU URL is configured, this entire feature is inactive and every
 route behaves exactly as if it didn't exist.
+
+**The Remote CPU URL must be a genuinely separate endpoint from the Remote
+GPU URL.** Pointed at the same URL, "CPU routing" isn't actually a separate,
+independently-stable container — it's the same volatile serverless GPU
+endpoint under a second label, so it gets none of the intended benefit and
+can make things *worse* (more traffic hitting that one endpoint during
+exactly the window — job just finished, container winding down — this
+feature exists to avoid). The proxy detects this and ignores the CPU URL
+(logging a warning on save) rather than actually using it when they match.
+
+## GPU keep-alive for long video/image viewing (opt-in)
+
+Without a separate CPU target, there's no way to serve `/view`/`/viewvideo`
+once the GPU container scales to zero after a job finishes. A browser
+`<video>` element doesn't hold one continuous connection for an entire
+video — it fetches chunks via Range requests as needed, and can go quiet
+for stretches (already buffered ahead) longer than the provider's own idle
+timeout, even while someone is still actively watching. Once the container
+is gone, playback cuts off and that output stays unreachable until
+something wakes the GPU again.
+
+The **"Keep GPU warm for video/image viewing"** toggle (off by default —
+it has a real cost) addresses this directly: while enabled, every
+`/view`/`/viewvideo` request that's actually forwarded to the GPU target
+(i.e. no separate CPU target is in play) notes the activity, and a
+background loop pings the GPU every **keep-alive ping interval** seconds
+for as long as that activity is within the last **keep-alive idle timeout**
+seconds — then stops pinging on its own. It only ever runs while there's
+been recent `/view`/`/viewvideo` traffic; it's not a way to keep the GPU
+permanently warm.
+
+This is the fallback for people without a separate CPU container who are
+willing to pay GPU cost to keep playback working — if you *do* have a
+genuinely separate CPU endpoint configured above, that's the better
+solution (cheaper, and this toggle is unnecessary alongside it).
 
 ## Model list caching
 
@@ -226,24 +263,27 @@ when it's safe to close.
   returned).
 - `POST /comfyui_proxy/config` — update `enabled`, `remote_url`, `timeout`,
   `post_completion_delay`, `jobs_cache_max_entries`, `auth_key`,
-  `remote_cpu_url`, `remote_cpu_auth_key` (send an empty string for either
-  auth key to leave the stored one unchanged).
+  `remote_cpu_url`, `remote_cpu_auth_key`, `gpu_keepalive_enabled`,
+  `gpu_keepalive_interval`, `gpu_keepalive_idle_timeout` (send an empty
+  string for either auth key to leave the stored one unchanged).
 - `POST /comfyui_proxy/refresh_models` — force a fresh pull of the remote
   model list.
 - `POST /comfyui_proxy/reset_state` — forcibly cancels any tracked shadow
-  relay connections and clears all tracked "incomplete job" state. Exposed
-  as the **Clear Stuck State** button in the panel; use it if the proxy
-  seems to think something's still running (e.g. after the remote died
-  mid-job in a way that never sent a clean completion message) without
-  having to restart ComfyUI. Returns immediately rather than waiting on the
-  cancelled connections' own cleanup, since that could itself hang against
-  an unreachable remote.
+  relay connections, clears all tracked "incomplete job" state, and stops
+  the GPU keep-alive loop if it's running. Exposed as the **Clear Stuck
+  State** button in the panel; use it if the proxy seems to think
+  something's still running (e.g. after the remote died mid-job in a way
+  that never sent a clean completion message) without having to restart
+  ComfyUI. Returns immediately rather than waiting on the cancelled
+  connections' own cleanup, since that could itself hang against an
+  unreachable remote.
 - `POST /comfyui_proxy/reset_config` — resets `remote_url`, `remote_cpu_url`,
   `timeout`, `post_completion_delay`, `jobs_cache_max_entries`, `auth_key`,
-  and `remote_cpu_auth_key` back to their defaults (and disables the proxy),
-  additionally clearing the job history cache and any tracked state/relays.
-  Exposed as the **Reset to Defaults** button in the panel, with a
-  confirmation prompt since it wipes both saved URLs and both auth keys.
+  `remote_cpu_auth_key`, and the GPU keep-alive settings back to their
+  defaults (and disables the proxy), additionally clearing the job history
+  cache and any tracked state/relays. Exposed as the **Reset to Defaults**
+  button in the panel, with a confirmation prompt since it wipes both saved
+  URLs and both auth keys.
 
 ## Notes / caveats
 

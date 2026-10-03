@@ -49,6 +49,7 @@ from server import PromptServer
 from . import config as cfgmod
 from . import forwarder
 from . import jobs_cache
+from . import keepalive
 from . import models_cache
 from . import relay
 from . import state
@@ -102,22 +103,37 @@ def _is_cpu_eligible(canonical: str) -> bool:
     )
 
 
+def _cpu_target_configured() -> bool:
+    """True only if a CPU URL is set AND it's actually different from the
+    GPU URL. Pointed at the same URL, 'CPU routing' isn't a separate,
+    independently-stable container at all — it's just the same volatile
+    serverless GPU endpoint under a second label, so it gets none of the
+    intended benefit and only adds extra traffic to that endpoint during
+    exactly the window (job just finished, container winding down) this
+    feature exists to avoid."""
+    cpu_url = (cfgmod.get("remote_cpu_url") or "").rstrip("/")
+    if not cpu_url:
+        return False
+    gpu_url = (cfgmod.get("remote_url") or "").rstrip("/")
+    return cpu_url != gpu_url
+
+
 def _use_cpu_target(canonical: str) -> bool:
     """True if this request should go to the CPU-only target instead of the
-    GPU one: only for file-only routes, only when a CPU URL is configured,
-    and only while a job isn't actually still running. Deliberately checks
-    state.has_incomplete_job() rather than the broader _remote_known_active()
-    (which also counts a live shadow relay): during the few-second grace
-    period after a job finishes — where the relay is intentionally kept
-    open only so progress/log animations can finish, not because new GPU
-    work is happening — the GPU container may already be winding down and
-    refusing new connections even though that websocket is still open, so
-    new file-serving requests in that window are better sent to the CPU
-    target (when configured) than forced onto a GPU container that's on its
-    way out anyway."""
+    GPU one: only for file-only routes, only when a genuinely distinct CPU
+    URL is configured, and only while a job isn't actually still running.
+    Deliberately checks state.has_incomplete_job() rather than the broader
+    _remote_known_active() (which also counts a live shadow relay): during
+    the few-second grace period after a job finishes — where the relay is
+    intentionally kept open only so progress/log animations can finish, not
+    because new GPU work is happening — the GPU container may already be
+    winding down and refusing new connections even though that websocket is
+    still open, so new file-serving requests in that window are better sent
+    to the CPU target (when configured) than forced onto a GPU container
+    that's on its way out anyway."""
     if not _is_cpu_eligible(canonical):
         return False
-    if not cfgmod.get("remote_cpu_url"):
+    if not _cpu_target_configured():
         return False
     return not state.has_incomplete_job()
 
@@ -131,10 +147,11 @@ def _should_proxy(path: str) -> bool:
     if any(canonical == p or canonical.startswith(p + "/") for p in GPU_ONLY_CONDITIONAL_PREFIXES):
         return _remote_known_active()
     if _is_cpu_eligible(canonical):
-        # Still worth proxying even while the GPU is idle, as long as a CPU
-        # target is configured to actually serve it — _use_cpu_target()
-        # (checked again at dispatch time) decides which target that is.
-        return _remote_known_active() or bool(cfgmod.get("remote_cpu_url"))
+        # Still worth proxying even while the GPU is idle, as long as a
+        # genuinely distinct CPU target is configured to actually serve it —
+        # _use_cpu_target() (checked again at dispatch time) decides which
+        # target that is.
+        return _remote_known_active() or _cpu_target_configured()
     if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
         return _remote_known_active()
     return False
@@ -391,10 +408,17 @@ async def proxy_middleware(request: web.Request, handler):
     # partial content, and status codes — to the CPU target when eligible
     # and the GPU isn't already active, otherwise to the GPU as usual.
     use_cpu = _use_cpu_target(canonical)
+    is_view_route = any(canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES)
     if use_cpu:
         logger.info(f"[ComfyUI Proxy] Using remote CPU container for {path} (GPU not active).")
-    elif not relay.has_active_relay():
-        asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
+    else:
+        if not relay.has_active_relay():
+            asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
+        if is_view_route:
+            # No separate CPU target to fall back to for this request — note
+            # the activity so the opt-in keep-alive (if enabled) knows to
+            # keep the GPU warm for continued viewing/playback.
+            keepalive.note_view_activity()
     return await forwarder.forward_http(request, use_cpu=use_cpu)
 
 
@@ -437,6 +461,7 @@ def setup():
             "enabled", "remote_url", "timeout", "auth_key",
             "remote_cpu_url", "remote_cpu_auth_key",
             "post_completion_delay", "jobs_cache_max_entries",
+            "gpu_keepalive_enabled", "gpu_keepalive_interval", "gpu_keepalive_idle_timeout",
         }
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
@@ -458,6 +483,18 @@ def setup():
                 clean["jobs_cache_max_entries"] = max(1, int(clean["jobs_cache_max_entries"]))
             except (TypeError, ValueError):
                 clean.pop("jobs_cache_max_entries", None)
+        if "gpu_keepalive_enabled" in clean:
+            clean["gpu_keepalive_enabled"] = bool(clean["gpu_keepalive_enabled"])
+        if "gpu_keepalive_interval" in clean:
+            try:
+                clean["gpu_keepalive_interval"] = max(5, float(clean["gpu_keepalive_interval"]))
+            except (TypeError, ValueError):
+                clean.pop("gpu_keepalive_interval", None)
+        if "gpu_keepalive_idle_timeout" in clean:
+            try:
+                clean["gpu_keepalive_idle_timeout"] = max(5, float(clean["gpu_keepalive_idle_timeout"]))
+            except (TypeError, ValueError):
+                clean.pop("gpu_keepalive_idle_timeout", None)
         if "auth_key" in clean and not clean["auth_key"]:
             clean.pop("auth_key", None)  # blank means "leave unchanged"
         if "remote_cpu_auth_key" in clean and not clean["remote_cpu_auth_key"]:
@@ -476,6 +513,15 @@ def setup():
             state.clear_all()  # a switched endpoint invalidates any tracked remote job
             jobs_cache.clear()  # ...and any cached job history from the old one
 
+        cpu_url = (cfg.get("remote_cpu_url") or "").rstrip("/")
+        gpu_url = (cfg.get("remote_url") or "").rstrip("/")
+        if cpu_url and cpu_url == gpu_url:
+            logger.warning(
+                "[ComfyUI Proxy] Remote CPU URL is identical to Remote GPU URL — this provides no "
+                "benefit (it's the same volatile endpoint under a second label) and is being ignored; "
+                "uploads/view/viewvideo will use the GPU target as if no CPU URL were set."
+            )
+
         return web.json_response(_public_config())
 
     @routes.post("/comfyui_proxy/refresh_models")
@@ -490,6 +536,7 @@ def setup():
         cleared_jobs = len(state.incomplete_ids())
         cancelled_relays = relay.cancel_all_relays()
         state.clear_all()
+        keepalive.stop()
         logger.info(
             f"[ComfyUI Proxy] Manual state reset: cleared {cleared_jobs} tracked job(s), "
             f"cancelled {cancelled_relays} relay connection(s)."
@@ -501,6 +548,7 @@ def setup():
         relay.cancel_all_relays()
         state.clear_all()
         jobs_cache.clear()
+        keepalive.stop()
         cfgmod.reset_to_defaults()
         logger.info("[ComfyUI Proxy] Config reset to defaults.")
         return web.json_response(_public_config())

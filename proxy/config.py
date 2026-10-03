@@ -32,6 +32,15 @@ DEFAULT_CONFIG = {
                                   # tear the shadow connection down
     "jobs_cache_max_entries": 64,  # max distinct /api/jobs path+query variants
                                     # to keep cached locally (oldest evicted first)
+    "gpu_keepalive_enabled": False,   # opt-in: ping the GPU periodically while
+                                       # /view or /viewvideo activity continues,
+                                       # so long video playback survives past the
+                                       # normal post-job grace window without a
+                                       # separate CPU target. Has a real cost —
+                                       # off by default.
+    "gpu_keepalive_interval": 20,     # seconds between keep-alive pings
+    "gpu_keepalive_idle_timeout": 60,  # stop pinging after this many seconds
+                                        # with no new /view or /viewvideo request
     "models_cache": None,      # dict of {"NodeName.param": [model, ...]} pulled once from remote
     "models_cache_url": None,  # remote_url the cache was pulled from (detects URL changes)
 }
