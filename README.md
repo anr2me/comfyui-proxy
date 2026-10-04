@@ -270,10 +270,17 @@ indefinitely.
 - A transient aiohttp connection-pool race (`ClientOSError`, e.g. "Cannot
   write to closing transport" — common when a burst of concurrent requests,
   like many thumbnails loading at once, hits a target that's still
-  cold-starting) is retried once automatically, as long as nothing has been
-  sent to the browser yet. A brand-new connection attempt failing outright
-  (`ClientConnectorError` — DNS failure, refused, ...) is not retried, since
-  that's a different, non-transient situation.
+  cold-starting) is retried once automatically after a brief pause (not an
+  instant retry — hammering the same broken pool/gateway state immediately
+  has a high chance of hitting the same race again), logged as a `WARNING`.
+  This only works as long as nothing has been sent to the browser yet; if
+  the same error happens *after* the response has already started
+  streaming back, retrying isn't possible (can't send a second response to
+  an already-started one) and it's logged as an `ERROR` instead, explicitly
+  noting it was too late to retry. A brand-new connection attempt failing
+  outright (`ClientConnectorError` — DNS failure, refused, ...) is also an
+  `ERROR` and is never retried, since that's a different, non-transient
+  situation.
 
 ## Endpoints added for the UI panel (never proxied)
 

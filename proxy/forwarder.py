@@ -33,6 +33,12 @@ HOP_BY_HOP = {
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
 
+# Pause before retrying a transient connection-pool race (see forward_http).
+# Brief on purpose — just enough for the connector to discard the broken
+# connection and the gateway to settle, not a noticeable delay for the
+# person waiting on an image/video to load.
+RETRY_DELAY = 0.3
+
 
 _safe_accept_encoding = None
 
@@ -279,9 +285,28 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
             # working one — but only while nothing has been sent to the
             # browser yet.
             if not headers_sent and attempt < max_attempts:
-                logger.warning(f"[ComfyUI Proxy] Transient connection error reaching remote {label} ({e}); retrying...")
+                logger.warning(
+                    f"[ComfyUI Proxy] Transient connection error reaching remote {label} ({e}); "
+                    f"retrying in {RETRY_DELAY:g}s (attempt {attempt + 1}/{max_attempts})..."
+                )
+                # A brief pause, not an instant retry: hammering the exact
+                # same pool/gateway state immediately is likely to hit the
+                # same race again. This gives the connector a moment to
+                # actually discard the broken connection and the gateway a
+                # moment to settle, before trying again.
+                await asyncio.sleep(RETRY_DELAY)
                 continue
-            logger.error(f"[ComfyUI Proxy] Client error forwarding request to remote {label}: {e}")
+            if headers_sent:
+                logger.error(
+                    f"[ComfyUI Proxy] Connection to remote {label} dropped mid-stream for "
+                    f"{request.rel_url.path} ({e}) — too late to retry, the browser already "
+                    "started receiving this response."
+                )
+            else:
+                logger.error(
+                    f"[ComfyUI Proxy] Client error forwarding request to remote {label} "
+                    f"after {max_attempts} attempt(s): {e}"
+                )
             return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
         except aiohttp.ClientResponseError as e:
             logger.error(f"[ComfyUI Proxy] Remote {label} responded with error: {e}")
