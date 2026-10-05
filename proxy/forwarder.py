@@ -15,6 +15,7 @@ Two aiohttp ClientSessions are kept alive for the process lifetime:
 import asyncio
 import importlib
 import logging
+import time
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -38,6 +39,52 @@ HOP_BY_HOP = {
 # connection and the gateway to settle, not a noticeable delay for the
 # person waiting on an image/video to load.
 RETRY_DELAY = 0.3
+
+
+# --- Circuit breaker for automatically-polled routes (/queue, /api/jobs) ---
+# These get re-requested by the frontend on its own, frequently, without
+# any awareness that a previous attempt just failed. If the remote is
+# genuinely unresponsive (not just slow), every single poll would otherwise
+# independently wait out the full configured timeout before giving up —
+# and since there's then always a new one in flight, that looks like
+# continuous legitimate activity to the serverless platform, preventing it
+# from ever scaling down on its own even though nothing is actually
+# working. After a failure, further live attempts on the affected target
+# are skipped (falling straight back to cache) for a cooldown window,
+# rather than attempted and left to time out one by one.
+_circuit_state = {False: {"open_until": 0.0, "failures": 0}, True: {"open_until": 0.0, "failures": 0}}
+
+
+def _circuit_breaker_cooldown() -> float:
+    # Configurable: different serverless providers scale down after very
+    # different idle windows, so a one-size-fits-all cooldown may not give
+    # a given provider's own idle-timeout enough of a quiet period to
+    # actually kick in.
+    return max(1.0, float(cfgmod.get("circuit_breaker_cooldown", 30) or 30))
+
+
+def circuit_is_open(use_cpu: bool = False) -> bool:
+    return time.time() < _circuit_state[use_cpu]["open_until"]
+
+
+def circuit_record_failure(use_cpu: bool = False):
+    st = _circuit_state[use_cpu]
+    st["failures"] += 1
+    cooldown = _circuit_breaker_cooldown()
+    st["open_until"] = time.time() + cooldown
+    label = "CPU" if use_cpu else "GPU"
+    logger.warning(
+        f"[ComfyUI Proxy] Remote {label} seems unresponsive (failure #{st['failures']}); pausing "
+        f"automatic polling of it for {cooldown:g}s rather than keep re-attempting."
+    )
+
+
+def circuit_record_success(use_cpu: bool = False):
+    st = _circuit_state[use_cpu]
+    if st["failures"] > 0:
+        logger.info(f"[ComfyUI Proxy] Remote {'CPU' if use_cpu else 'GPU'} responded again; resuming automatic polling.")
+    st["failures"] = 0
+    st["open_until"] = 0.0
 
 
 _safe_accept_encoding = None

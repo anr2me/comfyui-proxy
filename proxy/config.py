@@ -45,9 +45,17 @@ DEFAULT_CONFIG = {
                                        # sees the container idle again — an
                                        # open, pending connection is what
                                        # actually counts as "busy".)
-    "gpu_keepalive_idle_timeout": 60,  # stop extending after this many
+    "gpu_keepalive_idle_timeout": 20,  # stop extending after this many
                                         # seconds with no new /view or
                                         # /viewvideo request
+    "circuit_breaker_cooldown": 30,  # seconds to pause automatic /queue and
+                                      # /api/jobs polling after the remote
+                                      # fails to respond, so repeated polling
+                                      # doesn't keep it looking "active" to
+                                      # the serverless platform's own idle-
+                                      # timeout. Different providers scale
+                                      # down after very different idle
+                                      # windows, so this is tunable per setup.
     "models_cache": None,      # dict of {"NodeName.param": [model, ...]} pulled once from remote
     "models_cache_url": None,  # remote_url the cache was pulled from (detects URL changes)
 }

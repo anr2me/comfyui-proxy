@@ -124,7 +124,10 @@ async def handle_request(request: web.Request, remote_known_active: bool):
     query = request.rel_url.query_string
     path = request.rel_url.path
 
-    if not remote_known_active:
+    if not remote_known_active or forwarder.circuit_is_open():
+        # Either genuinely idle, or the remote just failed and we're
+        # deliberately not attempting another live request yet — either way,
+        # serve whatever's cached rather than touching the remote again.
         entry = _cache.get(query)
         if entry:
             return _response(entry)
@@ -142,6 +145,7 @@ async def handle_request(request: web.Request, remote_known_active: bool):
         status, data, text = await _live_fetch(path, query)
     except asyncio.TimeoutError:
         logger.error(f"[ComfyUI Proxy] Timeout fetching {path} from remote")
+        forwarder.circuit_record_failure()
         entry = _cache.get(query)
         if entry:
             logger.warning(f"[ComfyUI Proxy] {path} timed out; serving cached copy.")
@@ -149,18 +153,23 @@ async def handle_request(request: web.Request, remote_known_active: bool):
         return web.json_response({"error": "ComfyUI Proxy: remote GPU timed out"}, status=504)
     except aiohttp.ClientError as e:
         logger.error(f"[ComfyUI Proxy] Failed to fetch {path}: {e}")
+        forwarder.circuit_record_failure()
         entry = _cache.get(query)
         if entry:
             logger.warning(f"[ComfyUI Proxy] {path} failed; serving cached copy.")
             return _response(entry)
         return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
     except (RuntimeError, LookupError, UnicodeDecodeError) as e:
+        # Decode errors aren't a sign the remote is unresponsive — don't
+        # trip the breaker for these.
         logger.error(f"[ComfyUI Proxy] Decode error fetching {path}: {e}")
         entry = _cache.get(query)
         if entry:
             logger.warning(f"[ComfyUI Proxy] {path} decode failed; serving cached copy.")
             return _response(entry)
         return web.json_response({"error": f"ComfyUI Proxy: failed to decode remote response: {e}"}, status=502)
+
+    forwarder.circuit_record_success()
 
     if data is not None:
         return web.json_response(data, status=status)
@@ -174,16 +183,32 @@ async def refresh_known(reason: str = ""):
     (the shadow relay) has already closed by the time it's opened."""
     if not forwarder.target_base():
         return
+    if forwarder.circuit_is_open():
+        # The remote just failed elsewhere and we're deliberately not
+        # touching it again yet — don't let this closing-relay refresh
+        # attempt (and potentially wait out the full timeout on) a live
+        # fetch either; that would just delay the relay closing promptly.
+        logger.info(f"[ComfyUI Proxy] Skipping job history refresh ({reason}): remote recently unresponsive.")
+        return
     queries = list(_cache.keys()) or [""]
     failures = 0
+    attempted = 0
     for q in queries:
+        if forwarder.circuit_is_open():
+            # The first failure in this batch already proved the remote's
+            # down — no point waiting out the timeout again for every
+            # remaining query too.
+            break
+        attempted += 1
         logger.info(f"[ComfyUI Proxy] Retrieving remote job history ({PATH}{'?' + q if q else ''}) to cache...")
         try:
             await _live_fetch(PATH, q)
+            forwarder.circuit_record_success()
         except Exception as e:
             failures += 1
+            forwarder.circuit_record_failure()
             logger.warning(f"[ComfyUI Proxy] Pre-fetch of {PATH}?{q} ({reason}) failed: {e}")
-    ok = len(queries) - failures
+    ok = attempted - failures
     logger.info(
         f"[ComfyUI Proxy] Refreshed job history cache ({ok}/{len(queries)} "
         f"quer{'y' if len(queries) == 1 else 'ies'} ok, {reason})."

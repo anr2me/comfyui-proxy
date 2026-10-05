@@ -144,6 +144,14 @@ app.registerExtension({
         const timeoutInput = field("Timeout (seconds)", "number", "300");
         const delayInput = field("Post-completion delay (seconds)", "number", "5");
         const jobsCacheInput = field("Job history cache size", "number", "64");
+        const circuitCooldownInput = field(
+            "Unresponsive-GPU polling cooldown (seconds)", "number", "30"
+        );
+        circuitCooldownInput.title =
+            "After /queue or /api/jobs fails to respond, pauses automatic polling of it for this long " +
+            "before trying again, instead of repeatedly re-attempting and keeping it looking \"active\" " +
+            "to your serverless provider's own idle-timeout. Raise this if your provider's idle-timeout " +
+            "is longer than the default.";
         const authInput = field("Remote GPU Auth Key (optional)", "password", "Bearer token");
         const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
 
@@ -153,7 +161,7 @@ app.registerExtension({
             "keep arriving, so long video playback survives past the normal post-job grace window. Has a " +
             "real cost — off by default, and only useful if you don't have a Remote CPU URL configured above."
         );
-        const keepaliveIdleInput = field("  View-activity idle timeout (seconds)", "number", "60");
+        const keepaliveIdleInput = field("  View-activity idle timeout (seconds)", "number", "20");
 
         const statusLine = document.createElement("div");
         Object.assign(statusLine.style, { marginBottom: "8px", opacity: "0.75", fontSize: "11px", lineHeight: "1.4" });
@@ -247,8 +255,9 @@ app.registerExtension({
             timeoutInput.value = cfg.timeout || 300;
             delayInput.value = cfg.post_completion_delay ?? 5;
             jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
+            circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? 30;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
-            keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 60;
+            keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 20;
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             cpuAuthInput.placeholder = cfg.remote_cpu_auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             statusLine.textContent = cfg.remote_url
@@ -285,12 +294,14 @@ app.registerExtension({
                 timeout: parseFloat(timeoutInput.value) || 300,
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
+                circuit_breaker_cooldown: parseFloat(circuitCooldownInput.value),
                 gpu_keepalive_enabled: keepaliveInput.checked,
                 gpu_keepalive_idle_timeout: parseFloat(keepaliveIdleInput.value),
             };
             if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = 5;
             if (isNaN(patch.jobs_cache_max_entries) || patch.jobs_cache_max_entries < 1) patch.jobs_cache_max_entries = 64;
-            if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = 60;
+            if (isNaN(patch.circuit_breaker_cooldown) || patch.circuit_breaker_cooldown < 1) patch.circuit_breaker_cooldown = 30;
+            if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = 20;
             if (authInput.value.trim()) {
                 patch.auth_key = authInput.value.trim();
             }
@@ -347,7 +358,7 @@ app.registerExtension({
         });
 
         resetConfigBtn.addEventListener("click", async () => {
-            if (!confirm("Reset both remote URLs, timeout, delay, cache size, keep-alive settings, and both auth keys back to their defaults? This also disables the proxy.")) {
+            if (!confirm("Reset both remote URLs, timeout, delay, cache size, polling cooldown, keep-alive settings, and both auth keys back to their defaults? This also disables the proxy.")) {
                 return;
             }
             resetConfigBtn.textContent = "Resetting...";

@@ -277,22 +277,30 @@ async def _handle_prompt(request: web.Request) -> web.Response:
     timeout = forwarder.get_timeout()
     url = f"{base}{request.rel_url.path}"  # preserves /prompt vs /api/prompt as actually requested
 
+    # /prompt is an explicit user action, so it's always attempted even if
+    # the circuit is currently open for automatic polling — but its outcome
+    # still feeds that same shared signal, since a working /prompt is the
+    # clearest possible proof the remote has recovered.
     try:
         async with session.post(url, data=body, headers=headers, timeout=timeout) as r:
             status = r.status
             data, text, err = await _read_tracking_response(r, "/prompt")
             if err:
+                forwarder.circuit_record_failure()
                 return err
     except asyncio.TimeoutError:
         logger.error("[ComfyUI Proxy] Timeout submitting prompt to remote GPU")
+        forwarder.circuit_record_failure()
         return web.json_response(
             {"error": "ComfyUI Proxy: remote GPU timed out while queuing the prompt (try raising the timeout)"},
             status=504,
         )
     except aiohttp.ClientError as e:
         logger.error(f"[ComfyUI Proxy] Failed to submit prompt: {e}")
+        forwarder.circuit_record_failure()
         return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
 
+    forwarder.circuit_record_success()
     if data is not None:
         if 200 <= status < 300:
             prompt_id = data.get("prompt_id")
@@ -305,6 +313,16 @@ async def _handle_prompt(request: web.Request) -> web.Response:
 
 
 async def _handle_queue(request: web.Request) -> web.Response:
+    # /queue is polled automatically and frequently by the frontend while a
+    # job is incomplete — if the remote just failed, skip straight to an
+    # error instead of attempting (and potentially waiting out the full
+    # timeout on) another live request; see forwarder's circuit breaker.
+    if forwarder.circuit_is_open():
+        return web.json_response(
+            {"error": "ComfyUI Proxy: remote GPU is temporarily unresponsive; pausing automatic polling"},
+            status=503,
+        )
+
     base = forwarder.target_base()
     headers = forwarder.copy_request_headers(request, limit_encoding=True)
     session = forwarder.get_tracking_session()
@@ -318,14 +336,18 @@ async def _handle_queue(request: web.Request) -> web.Response:
             status = r.status
             data, _text, err = await _read_tracking_response(r, "/queue")
             if err:
+                forwarder.circuit_record_failure()
                 return err
     except asyncio.TimeoutError:
         logger.error("[ComfyUI Proxy] Timeout fetching remote queue state")
+        forwarder.circuit_record_failure()
         return web.json_response({"error": "ComfyUI Proxy: remote GPU timed out"}, status=504)
     except aiohttp.ClientError as e:
         logger.error(f"[ComfyUI Proxy] Failed to fetch remote queue: {e}")
+        forwarder.circuit_record_failure()
         return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
 
+    forwarder.circuit_record_success()
     if data is not None:
         if not data.get("queue_running") and not data.get("queue_pending"):
             state.clear_all()
@@ -462,6 +484,7 @@ def setup():
             "remote_cpu_url", "remote_cpu_auth_key",
             "post_completion_delay", "jobs_cache_max_entries",
             "gpu_keepalive_enabled", "gpu_keepalive_idle_timeout",
+            "circuit_breaker_cooldown",
         }
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
@@ -490,6 +513,11 @@ def setup():
                 clean["gpu_keepalive_idle_timeout"] = max(5, float(clean["gpu_keepalive_idle_timeout"]))
             except (TypeError, ValueError):
                 clean.pop("gpu_keepalive_idle_timeout", None)
+        if "circuit_breaker_cooldown" in clean:
+            try:
+                clean["circuit_breaker_cooldown"] = max(1, float(clean["circuit_breaker_cooldown"]))
+            except (TypeError, ValueError):
+                clean.pop("circuit_breaker_cooldown", None)
         if "auth_key" in clean and not clean["auth_key"]:
             clean.pop("auth_key", None)  # blank means "leave unchanged"
         if "remote_cpu_auth_key" in clean and not clean["remote_cpu_auth_key"]:
