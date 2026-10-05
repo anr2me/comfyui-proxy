@@ -11,7 +11,7 @@ A small draggable pill in the corner of the screen lets you turn this on or
 off, and expands into a settings panel.
 
 <i><b>Note:</b> This custom node was mainly tested on ComfyUI deployed at Modal.com using https://github.com/anr2me/modal-comfyui  
-(ComfyGPU's URL for Remote GPU URL, and ComfyCPU's URL for Remote CPU URL).</i>
+(ComfyGPU's URL for Remote GPU URL, and optionally ComfyCPU's URL for Remote CPU URL).</i>
 
 ## Install
 
