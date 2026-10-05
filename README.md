@@ -89,7 +89,7 @@ Tap the pill, then the label, to open the panel.
   video keep-alive option above.
 - Model/checkpoint dropdowns are refreshed from the remote once (and
   whenever you change the URL), so you don't see models that only exist on
-  your remote machine as available locally, or vice versa.
+  your remote machine as available locally, or vice versa. You may need to refresh the ComfyUI browser tab for the models list changes to reflects on dropdowns.
 
 ## If something seems stuck
 
