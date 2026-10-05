@@ -4,6 +4,6 @@ description = "Forward ComfyUI job/output/WebSocket traffic to a configurable cl
 version = "1.0.0"
 
 [tool.comfy]
-PublisherId = "your-name-here"
+PublisherId = "anr2me"
 DisplayName = "ComfyUI Proxy"
 Icon = ""
