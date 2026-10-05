@@ -10,6 +10,9 @@ remote machine.
 A small draggable pill in the corner of the screen lets you turn this on or
 off, and expands into a settings panel.
 
+<i><b>Note:</b> This custom node was mainly tested on ComfyUI deployed at Modal.com using https://github.com/anr2me/modal-comfyui  
+(ComfyGPU's URL for Remote GPU URL, and ComfyCPU's URL for Remote CPU URL).</i>
+
 ## Install
 
 Clone this repository into `ComfyUI/custom_nodes/` directory and restart ComfyUI. 
@@ -26,6 +29,8 @@ cd comfyui-proxy
 pip install -r requirements.txt
 ```
 
+<i><b>Note:</b> It's recommended to install the same custom nodes on your local ComfyUI with the one available on your server side ComfyUI, so you can use those custom nodes on your workflow locally.</i>
+
 ## Settings
 
 Tap the pill, then the label, to open the panel.
@@ -36,7 +41,7 @@ Tap the pill, then the label, to open the panel.
   needs one.
 - **Remote CPU URL** *(optional)* — a second, separate endpoint that shares
   the same storage as your GPU one but doesn't need a GPU itself. If you
-  have one, uploading images and viewing/downloading results can use this
+  have one, uploading input images/videos and viewing/downloading output results can use this
   cheaper endpoint instead of waking the GPU just to serve a file. This
   only helps if it's a genuinely different, separately-running endpoint —
   pointing it at the same URL as your GPU one does nothing useful.
@@ -97,4 +102,5 @@ Open the panel and use:
 
 The ComfyUI console log explains what the proxy is doing as it happens —
 when it's waking the remote, which endpoint a request went to, and why, so
-if something looks off that's the first place to check.
+if something looks off that's the first place to check.  
+If you saw HTTP status 5XX in the logs, it means something wrong happened on server side (ie. Comfy server might be crashed or not ready yet).
