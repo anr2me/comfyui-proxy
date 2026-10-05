@@ -140,7 +140,9 @@ app.registerExtension({
         }
 
         const urlInput = field("Remote GPU URL", "text", "https://your-endpoint.example.com");
+        const authInput = field("Remote GPU Auth Key (optional)", "password", "Bearer token");
         const cpuUrlInput = field("Remote CPU URL (optional)", "text", "https://your-cpu-endpoint.example.com");
+        const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
         const timeoutInput = field("Timeout (seconds)", "number", "300");
         const delayInput = field("Post-completion delay (seconds)", "number", "5");
         const jobsCacheInput = field("Job history cache size", "number", "64");
@@ -152,8 +154,6 @@ app.registerExtension({
             "before trying again, instead of repeatedly re-attempting and keeping it looking \"active\" " +
             "to your serverless provider's own idle-timeout. Raise this if your provider's idle-timeout " +
             "is longer than the default.";
-        const authInput = field("Remote GPU Auth Key (optional)", "password", "Bearer token");
-        const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
 
         const keepaliveInput = checkboxField(
             "Keep GPU warm for video/image viewing",
