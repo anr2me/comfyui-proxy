@@ -29,7 +29,8 @@ cd comfyui-proxy
 pip install -r requirements.txt
 ```
 
-<i><b>Note:</b> It's recommended to install the same custom nodes on your local ComfyUI with the one available on your server side ComfyUI, so you can use those custom nodes on your workflow locally.</i>
+<i><b>Note:</b> It's recommended to install the same custom nodes on your local ComfyUI with the one available on your server side ComfyUI, so you can use those custom nodes on your workflow locally. 
+Meanwhile, models list will be pulled from server side ComfyUI, thus you can't use your locally downloaded models when the Remote GPU is enabled, since the models might not be available on server side.</i>
 
 ## Settings
 
