@@ -40,6 +40,7 @@ Routing rules:
 import asyncio
 import json
 import logging
+import os
 import time
 
 import aiohttp
@@ -53,6 +54,7 @@ from . import keepalive
 from . import models_cache
 from . import relay
 from . import state
+from . import viewcache
 
 logger = logging.getLogger("ComfyUIProxy")
 
@@ -415,6 +417,24 @@ async def proxy_middleware(request: web.Request, handler):
             jobs_cache.clear()
             logger.info(f"[ComfyUI Proxy] Cleared local job history cache ({path}, clear=true).")
 
+    # "Auto-download viewed input/output": a /view file that's already on disk
+    # is served by ComfyUI's own /view handler (so no remote is involved at
+    # all, and Range/preview handling stays identical); one that isn't gets
+    # forwarded as usual below, with a sink that keeps a local copy.
+    view_local_path = None
+    if (
+        _is_enabled()
+        and cfgmod.get("auto_download_viewed")
+        and canonical == "/view"
+        and request.method in ("GET", "HEAD")
+    ):
+        view_local_path = viewcache.local_path_for(request.rel_url.query)
+        if view_local_path is not None:
+            if os.path.isfile(view_local_path):
+                return await handler(request)
+            if request.method != "GET":
+                view_local_path = None
+
     if not _is_enabled() or not _should_proxy(path):
         return await handler(request)
 
@@ -448,7 +468,8 @@ async def proxy_middleware(request: web.Request, handler):
             # the activity so the opt-in keep-alive (if enabled) knows to
             # keep the GPU warm for continued viewing/playback.
             keepalive.note_view_activity()
-    return await forwarder.forward_http(request, use_cpu=use_cpu)
+    sink = viewcache.make_sink(view_local_path, request, use_cpu) if view_local_path else None
+    return await forwarder.forward_http(request, use_cpu=use_cpu, sink=sink)
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +513,7 @@ def setup():
             "post_completion_delay", "jobs_cache_max_entries",
             "gpu_keepalive_enabled", "gpu_keepalive_idle_timeout",
             "circuit_breaker_cooldown", "circuit_breaker_max_failures",
+            "auto_download_viewed",
         }
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
@@ -513,6 +535,8 @@ def setup():
                 clean["jobs_cache_max_entries"] = max(1, int(clean["jobs_cache_max_entries"]))
             except (TypeError, ValueError):
                 clean.pop("jobs_cache_max_entries", None)
+        if "auto_download_viewed" in clean:
+            clean["auto_download_viewed"] = bool(clean["auto_download_viewed"])
         if "gpu_keepalive_enabled" in clean:
             clean["gpu_keepalive_enabled"] = bool(clean["gpu_keepalive_enabled"])
         if "gpu_keepalive_idle_timeout" in clean:
@@ -540,6 +564,8 @@ def setup():
         newly_enabled = clean.get("enabled") and not prev.get("enabled")
 
         cfg = cfgmod.update_config(clean)
+        if not cfg.get("auto_download_viewed") or url_changed:
+            viewcache.cancel_all()  # stop background file downloads (turned off, or endpoint switched)
 
         if cfg.get("enabled") and cfg.get("remote_url") and (url_changed or newly_enabled or not cfg.get("models_cache")):
             asyncio.create_task(models_cache.refresh_models_cache(force=url_changed))
@@ -573,6 +599,7 @@ def setup():
         cancelled_relays = relay.cancel_all_relays()
         state.clear_all()
         forwarder.circuit_reset()
+        viewcache.cancel_all()
         keepalive.stop()
         logger.info(
             f"[ComfyUI Proxy] Manual state reset: cleared {cleared_jobs} tracked job(s), "
@@ -586,6 +613,7 @@ def setup():
         state.clear_all()
         jobs_cache.clear()
         forwarder.circuit_reset()
+        viewcache.cancel_all()
         keepalive.stop()
         cfgmod.reset_to_defaults()
         logger.info("[ComfyUI Proxy] Config reset to defaults.")

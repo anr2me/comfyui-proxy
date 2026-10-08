@@ -296,11 +296,15 @@ async def _do_wake_ping(base: str, reason: str, use_cpu: bool = False):
         logger.warning(f"[ComfyUI Proxy] Unexpected error waking up remote {label}: {e}")
 
 
-async def forward_http(request: web.Request, use_cpu: bool = False) -> web.StreamResponse:
+async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -> web.StreamResponse:
     """Stream a single HTTP request/response through to the target (GPU by
     default, or the optional CPU-only target when use_cpu is True),
     preserving status, headers (incl. Content-Encoding / Content-Range), and
-    body as-is."""
+    body as-is.
+
+    `sink` (optional, see viewcache.py) is shown the response as it streams
+    past: begin(status, headers), write(chunk) for every chunk, then
+    end(complete) — used to keep a local copy of viewed files."""
     label = "CPU" if use_cpu else "GPU"
     base = target_base(use_cpu)
     if not base:
@@ -334,13 +338,23 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
                     logger.error(f"[ComfyUI Proxy] Remote {label} returned {remote_resp.status} for {request.method} {request.rel_url.path}")
 
                 stream_resp = web.StreamResponse(status=remote_resp.status, headers=resp_headers)
-                await stream_resp.prepare(request)
-                headers_sent = True  # past this point a retry is no longer safe: the
-                                      # browser has already received a response's headers
-                async for chunk in remote_resp.content.iter_any():
-                    await stream_resp.write(chunk)
-                await stream_resp.write_eof()
-                return stream_resp
+                if sink is not None:
+                    sink.begin(remote_resp.status, remote_resp.headers)
+                stream_complete = False
+                try:
+                    await stream_resp.prepare(request)
+                    headers_sent = True  # past this point a retry is no longer safe: the
+                                          # browser has already received a response's headers
+                    async for chunk in remote_resp.content.iter_any():
+                        if sink is not None:
+                            await sink.write(chunk)
+                        await stream_resp.write(chunk)
+                    await stream_resp.write_eof()
+                    stream_complete = True
+                    return stream_resp
+                finally:
+                    if sink is not None:
+                        sink.end(stream_complete)
 
         except asyncio.TimeoutError:
             logger.error(f"[ComfyUI Proxy] Timeout forwarding {request.method} {request.rel_url.path} to remote {label}")

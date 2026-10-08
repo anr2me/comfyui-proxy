@@ -32,6 +32,12 @@ DEFAULT_CONFIG = {
                                   # tear the shadow connection down
     "jobs_cache_max_entries": 64,  # max distinct /api/jobs path+query variants
                                     # to keep cached locally (oldest evicted first)
+    "auto_download_viewed": False,  # opt-in: save files viewed via /view
+                                     # (type=output/input) into the local
+                                     # output/input folder and serve them from
+                                     # there afterwards (see viewcache.py), so
+                                     # re-rendering thumbnails doesn't wake the
+                                     # remote again
     "gpu_keepalive_enabled": False,   # opt-in: extend the shadow relay's own
                                        # open websocket connection to the GPU
                                        # while /view or /viewvideo activity

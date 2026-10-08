@@ -155,6 +155,15 @@ app.registerExtension({
             "to your serverless provider's own idle-timeout. Raise this if your provider's idle-timeout " +
             "is longer than the default.";
 
+        const autoDlInput = checkboxField(
+            "Auto-download viewed input/output",
+            "Saves files the UI views from the remote (type=output / type=input, as used by the Media " +
+            "Assets panel) into your local ComfyUI output/input folder, and serves them from there " +
+            "afterwards, so redrawing thumbnails (e.g. after switching browser tabs) doesn't wake the " +
+            "remote again. Partial (Range) downloads are tracked in <filename>.tmp / <filename>.map " +
+            "files until the whole file is present."
+        );
+
         const keepaliveInput = checkboxField(
             "Keep GPU warm for video/image viewing",
             "Keeps the existing progress connection to the GPU open while /view or /viewvideo requests " +
@@ -256,6 +265,7 @@ app.registerExtension({
             delayInput.value = cfg.post_completion_delay ?? 5;
             jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
             circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? 30;
+            autoDlInput.checked = !!cfg.auto_download_viewed;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
             keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 20;
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
@@ -295,6 +305,7 @@ app.registerExtension({
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
                 circuit_breaker_cooldown: parseFloat(circuitCooldownInput.value),
+                auto_download_viewed: autoDlInput.checked,
                 gpu_keepalive_enabled: keepaliveInput.checked,
                 gpu_keepalive_idle_timeout: parseFloat(keepaliveIdleInput.value),
             };
