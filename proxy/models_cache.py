@@ -41,7 +41,7 @@ async def refresh_models_cache(force: bool = False):
     except Exception as e:
         logger.warning(
             f"[ComfyUI Proxy] Failed to fetch remote model list: {e}. "
-            "If this is a decode/compression error, install the 'Brotli' and 'zstandard' packages."
+            "If this is a decode/compression error, install the 'Brotli' and 'backports.zstd' packages."
         )
         return cfg.get("models_cache")
 
