@@ -63,19 +63,14 @@ Tap the pill, then the label, to open the panel.
   trying again, so a broken connection doesn't keep your serverless
   instance looking "busy" forever. If your provider takes longer than the
   default (30s) to actually shut down an idle instance, raise this.
-- **Auto-download viewed input/output** *(off by default)* — saves files the
-  UI views from the remote (`/view` with `type=output` or `type=input`, i.e.
-  what the Media Assets panel shows) into your local ComfyUI `output` /
-  `input` folder, under the same subfolder and filename. Once a file is on
-  disk it is served locally, so switching browser tabs or re-opening the
-  panel no longer wakes the remote just to redraw a thumbnail. Videos are
-  usually fetched in pieces (Range requests); the pieces are collected in a
-  `<filename>.tmp` file with a `<filename>.map` file tracking which byte
-  ranges are present, the rest is downloaded in the background, and the file
-  is renamed into place once complete. An interrupted download resumes from
-  the `.map` the next time the file is viewed. Note that an existing local
-  file with the same name is served as-is, without checking it against the
-  remote's copy.
+- **Auto-download viewed input/output** *(off by default)* — saves the
+  images and videos you view in the Media Assets panel to your local
+  `output` / `input` folder. Once a file is saved, it's shown from your own
+  computer, so switching browser tabs or reopening the panel no longer
+  wakes the remote just to redraw thumbnails. Big files finish downloading
+  in the background and pick up where they left off if interrupted (you may
+  briefly see `.tmp` / `.map` files next to them). If a local file with the
+  same name already exists, it's used as-is.
 - **Keep GPU warm for video/image viewing** *(off by default)* — only
   relevant if you don't have a Remote CPU URL. Normally, once a job
   finishes, the connection to the GPU closes after a few seconds and the
