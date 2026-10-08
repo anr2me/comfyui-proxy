@@ -255,8 +255,15 @@ async def _read_tracking_response(r: aiohttp.ClientResponse, context: str):
 
 async def _handle_prompt(request: web.Request) -> web.Response:
     base = forwarder.target_base()
-    body = await request.read()
-
+    try:
+        body = await request.read()
+    except ConnectionError as e:  # ConnectionResetError is a subclass
+        logger.warning(
+            f"[ComfyUI Proxy] Remote GPU disconnected before {request.rel_url.path} body was received "
+            f"({e}); submission dropped."
+        )
+        return web.Response(status=499) # nobody is listening, so this is just for aiohttp
+    
     client_id = None
     try:
         client_id = (json.loads(body) or {}).get("client_id")
