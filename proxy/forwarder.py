@@ -375,7 +375,7 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
             # the remote for nobody, so bail out quietly instead.
             transport = request.transport
             if transport is None or transport.is_closing():
-                logger.info(
+                logger.warning(
                     f"[ComfyUI Proxy] Browser closed the connection while forwarding {req_desc} "
                     f"to remote {label} ({type(e).__name__}); abandoning request."
                 )
