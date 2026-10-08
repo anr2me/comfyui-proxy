@@ -34,7 +34,9 @@ Routing rules:
   - GET /crystools/monitor/GPU (and its /api alias) that stays local — i.e.
     isn't forwarded because no job is active — has an empty "no GPU" answer
     replaced with a fake GPU (config.GPU_NAME / GPU_COUNT), so Crystools'
-    GPU monitors still appear while the real GPU is remote.
+    GPU monitors still appear while the real GPU is remote. PATCH
+    /crystools/monitor/GPU/<index> for those fake GPUs is answered with a
+    stub 200 instead of Crystools' "400 Bad Request" for a missing GPU.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -45,6 +47,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 
 import aiohttp
@@ -375,6 +378,8 @@ async def _handle_queue(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 _fake_gpu_logged = False
+_fake_gpu_active = False  # the last GET /monitor/GPU was answered with the fake list
+_FAKE_GPU_PATCH_RE = re.compile(r"^/crystools/monitor/GPU/(\d+)/?$")
 
 
 def _fake_gpu_list() -> list:
@@ -390,7 +395,7 @@ def _maybe_fake_crystools_gpu(resp: web.StreamResponse) -> web.StreamResponse:
     """Replace an empty/'no GPU' local Crystools GPU list with the fake one.
     Anything else (a real GPU, an error status, a streamed or unparseable
     response) is returned untouched."""
-    global _fake_gpu_logged
+    global _fake_gpu_logged, _fake_gpu_active
     if not isinstance(resp, web.Response) or resp.status != 200:
         return resp
     raw = resp.body
@@ -401,14 +406,29 @@ def _maybe_fake_crystools_gpu(resp: web.StreamResponse) -> web.StreamResponse:
     except Exception:
         return resp  # non-empty but unparseable: not ours to touch
     if data and not (isinstance(data, list) and not data[0]):
+        _fake_gpu_active = False
         return resp  # a real GPU was detected locally
     fake = _fake_gpu_list()
+    _fake_gpu_active = True
     if not _fake_gpu_logged:
         _fake_gpu_logged = True
         logger.info(
             f"[ComfyUI Proxy] No local GPU detected; reporting {len(fake)}x {fake[0]['name']} to Crystools."
         )
     return web.json_response(fake)
+
+
+def _stub_fake_gpu_patch(request: web.Request, canonical: str):
+    """Crystools' PATCH /monitor/GPU/<index> (per-GPU monitor toggles) answers
+    "400 Bad Request" for an index it doesn't have — which is every index
+    while we're faking the GPU. Acknowledge those with a 200 instead (the
+    toggles have nothing to act on anyway). None = not a request we handle."""
+    if request.method != "PATCH" or not _fake_gpu_active:
+        return None
+    m = _FAKE_GPU_PATCH_RE.match(canonical)
+    if m is None or int(m.group(1)) >= len(_fake_gpu_list()):
+        return None
+    return web.Response(status=200)
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +503,10 @@ async def proxy_middleware(request: web.Request, handler):
                 view_local_path = None
 
     if not _is_enabled() or not _should_proxy(path):
+        if _is_enabled():
+            stub = _stub_fake_gpu_patch(request, canonical)
+            if stub is not None:
+                return stub
         resp = await handler(request)
         if _is_enabled() and request.method == "GET" and canonical.rstrip("/") == "/crystools/monitor/GPU":
             resp = _maybe_fake_crystools_gpu(resp)
