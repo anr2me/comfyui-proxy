@@ -25,9 +25,10 @@ Flow, per the intended sequence:
   3. Every remote message (text or binary — progress, previews, logs) is
      immediately re-emitted onto the local socket for that clientId.
   4. On detecting completion for every prompt_id tracked against this
-     client, waits a configurable delay (default 5s) before unsubscribing
-     logs and closing the shadow connection, so in-flight progress/log
-     animations have time to finish.
+     client, keeps reading and relaying whatever the remote still sends for
+     a configurable delay (default 5s) before unsubscribing logs and closing
+     the shadow connection, so in-flight progress/log animations (and the
+     final "Prompt executed in ..." log line) still reach the UI.
 """
 
 import asyncio
@@ -165,7 +166,34 @@ def _signal_ready(client_id: str):
         ev.set()
 
 
-async def _extend_for_view_activity(client_id: str):
+async def _relay_for(ws_remote, client_id: str, seconds: float) -> bool:
+    """Keep reading the remote shadow socket and relaying what it sends onto
+    the local one for up to `seconds`, instead of just sleeping. A plain
+    sleep leaves everything the remote sends in that window sitting unread
+    in the socket's buffer — and when the connection is then closed those
+    messages are lost, including the final "Prompt executed in ..." log line
+    the remote emits right after its completion message. Returns True if the
+    remote closed the socket meanwhile."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        try:
+            msg = await ws_remote.receive(timeout=remaining)
+        except asyncio.TimeoutError:
+            return False
+        if msg.type in (aiohttp.WSMsgType.TEXT, aiohttp.WSMsgType.BINARY):
+            await _inject_local(client_id, msg)
+        elif msg.type in (
+            aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING,
+            aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR,
+        ):
+            return True
+
+
+async def _extend_for_view_activity(client_id: str, ws_remote):
     """Keep this relay's already-open websocket connection alive for as
     long as /view or /viewvideo requests keep arriving for it, instead of
     pinging separately: an open, pending connection is what actually counts
@@ -190,7 +218,9 @@ async def _extend_for_view_activity(client_id: str):
         if not keepalive.enabled():
             logger.info(f"[ComfyUI Proxy] GPU keep-alive disabled; ending extension for client {client_id}.")
             return
-        await asyncio.sleep(min(poll_interval, remaining))
+        if await _relay_for(ws_remote, client_id, min(poll_interval, remaining)):
+            logger.info(f"[ComfyUI Proxy] Remote closed the progress stream for client {client_id}; ending extension.")
+            return
 
 
 async def _run_relay(client_id: str):
@@ -282,7 +312,8 @@ async def _run_relay(client_id: str):
                                     f"[ComfyUI Proxy] No jobs left on remote GPU for client {client_id}; "
                                     f"keeping progress stream open {delay:g}s more for final UI updates."
                                 )
-                                await asyncio.sleep(delay)
+                                if await _relay_for(ws_remote, client_id, delay):
+                                    break  # the remote closed the socket on its own
                             # Re-check: ensure_relay_ready() treats this task as
                             # "already ready" for as long as it's alive, so a
                             # prompt re-submitted during the delay above reuses
@@ -297,7 +328,7 @@ async def _run_relay(client_id: str):
                                 )
                             else:
                                 if keepalive.enabled():
-                                    await _extend_for_view_activity(client_id)
+                                    await _extend_for_view_activity(client_id, ws_remote)
                                 # The extension above can run for a while —
                                 # a prompt could have been resubmitted during
                                 # it too, so check once more before closing.
