@@ -40,6 +40,16 @@ HOP_BY_HOP = {
 # person waiting on an image/video to load.
 RETRY_DELAY = 0.3
 
+# Errors meaning "the pooled connection was already closing when we wrote to
+# it". On aiohttp >= 3.10 "Cannot write to closing transport" is raised as
+# ClientConnectionResetError, which is NOT a ClientOSError subclass, so it
+# must be listed explicitly or it skips the retry and lands in the generic
+# ClientError handler.
+_TRANSIENT_CONN_ERRORS = tuple(
+    c for c in (aiohttp.ClientOSError, getattr(aiohttp, "ClientConnectionResetError", None))
+    if c is not None
+)
+
 
 # --- Circuit breaker for automatically-polled routes (/queue, /api/jobs) ---
 # These get re-requested by the frontend on its own, frequently, without
@@ -305,10 +315,12 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
     timeout = get_timeout()
     body = await request.read() if request.can_read_body else None
 
+    req_desc = f"{request.method} {request.rel_url.path_qs}"  # for error logs
     session = get_session()
     max_attempts = 2  # one retry for a transient connection-pool race — see below
     for attempt in range(1, max_attempts + 1):
         headers_sent = False
+        stream_resp = None
         try:
             async with session.request(
                 request.method, target_url, headers=headers, data=body,
@@ -342,9 +354,9 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
             # below since ClientConnectorError is itself a subclass of it,
             # and a brand new connection attempt failing outright is not the
             # same transient, worth-retrying situation handled there.
-            logger.error(f"[ComfyUI Proxy] Connection error reaching remote {label}: {e}")
+            logger.error(f"[ComfyUI Proxy] Connection error reaching remote {label} for {req_desc}: {e}")
             return web.json_response({"error": f"ComfyUI Proxy: cannot reach remote {label}: {e}"}, status=502)
-        except aiohttp.ClientOSError as e:
+        except _TRANSIENT_CONN_ERRORS as e:
             # Covers things like "Cannot write to closing transport" — a
             # transient aiohttp connection-pool race where the pool hands
             # out an existing, pooled connection the remote/gateway is
@@ -356,9 +368,24 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
             # once this is raised, so a retry almost always gets a fresh,
             # working one — but only while nothing has been sent to the
             # browser yet.
+            #
+            # aiohttp raises this same message when the *browser's* socket is
+            # the one that's closing (it navigated away / cancelled the
+            # request). Retrying then would only hit — and possibly wake —
+            # the remote for nobody, so bail out quietly instead.
+            transport = request.transport
+            if transport is None or transport.is_closing():
+                logger.info(
+                    f"[ComfyUI Proxy] Browser closed the connection while forwarding {req_desc} "
+                    f"to remote {label} ({type(e).__name__}); abandoning request."
+                )
+                if headers_sent and stream_resp is not None:
+                    return stream_resp
+                return web.Response(status=499)
             if not headers_sent and attempt < max_attempts:
                 logger.warning(
-                    f"[ComfyUI Proxy] Transient connection error reaching remote {label} ({e}); "
+                    f"[ComfyUI Proxy] Transient connection error reaching remote {label} for {req_desc} "
+                    f"({type(e).__name__}: {e}); "
                     f"retrying in {RETRY_DELAY:g}s (attempt {attempt + 1}/{max_attempts})..."
                 )
                 # A brief pause, not an instant retry: hammering the exact
@@ -371,20 +398,23 @@ async def forward_http(request: web.Request, use_cpu: bool = False) -> web.Strea
             if headers_sent:
                 logger.error(
                     f"[ComfyUI Proxy] Connection to remote {label} dropped mid-stream for "
-                    f"{request.rel_url.path} ({e}) — too late to retry, the browser already "
+                    f"{req_desc} ({type(e).__name__}: {e}) — too late to retry, the browser already "
                     "started receiving this response."
                 )
             else:
                 logger.error(
-                    f"[ComfyUI Proxy] Client error forwarding request to remote {label} "
-                    f"after {max_attempts} attempt(s): {e}"
+                    f"[ComfyUI Proxy] Client error forwarding {req_desc} to remote {label} "
+                    f"after {max_attempts} attempt(s) ({type(e).__name__}): {e}"
                 )
             return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
         except aiohttp.ClientResponseError as e:
-            logger.error(f"[ComfyUI Proxy] Remote {label} responded with error: {e}")
+            logger.error(f"[ComfyUI Proxy] Remote {label} responded with error for {req_desc}: {e}")
             return web.json_response({"error": f"ComfyUI Proxy: remote {label} error: {e.message}"}, status=e.status or 502)
         except aiohttp.ClientError as e:
-            logger.error(f"[ComfyUI Proxy] Client error forwarding request to remote {label}: {e}")
+            logger.error(
+                f"[ComfyUI Proxy] Client error forwarding {req_desc} to remote {label} "
+                f"({type(e).__name__}): {e}"
+            )
             return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
         except (UnicodeDecodeError, LookupError) as e:
             logger.error(f"[ComfyUI Proxy] Encoding error while forwarding to remote {label}: {e}")
