@@ -63,8 +63,19 @@ def _circuit_breaker_cooldown() -> float:
     return max(1.0, float(cfgmod.get("circuit_breaker_cooldown", 30) or 30))
 
 
+def _circuit_max_failures() -> int:
+    try:
+        return max(0, int(cfgmod.get("circuit_breaker_max_failures", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
 def circuit_is_open(use_cpu: bool = False) -> bool:
-    return time.time() < _circuit_state[use_cpu]["open_until"]
+    st = _circuit_state[use_cpu]
+    max_f = _circuit_max_failures()
+    if max_f and st["failures"] >= max_f:
+        return True  # latched: stays open until a success or manual reset
+    return time.time() < st["open_until"]
 
 
 def circuit_record_failure(use_cpu: bool = False):
@@ -73,6 +84,13 @@ def circuit_record_failure(use_cpu: bool = False):
     cooldown = _circuit_breaker_cooldown()
     st["open_until"] = time.time() + cooldown
     label = "CPU" if use_cpu else "GPU"
+    max_f = _circuit_max_failures()
+    if max_f and st["failures"] >= max_f:
+        logger.warning(
+            f"[ComfyUI Proxy] Remote {label} unresponsive (failure #{st['failures']}); giving up "
+            "automatic polling until the next successful /prompt or a manual state reset."
+        )
+        return
     logger.warning(
         f"[ComfyUI Proxy] Remote {label} seems unresponsive (failure #{st['failures']}); pausing "
         f"automatic polling of it for {cooldown:g}s rather than keep re-attempting."
@@ -85,6 +103,13 @@ def circuit_record_success(use_cpu: bool = False):
         logger.info(f"[ComfyUI Proxy] Remote {'CPU' if use_cpu else 'GPU'} responded again; resuming automatic polling.")
     st["failures"] = 0
     st["open_until"] = 0.0
+
+
+def circuit_reset():
+    """Clear the breaker for both targets (manual reset / endpoint change)."""
+    for st in _circuit_state.values():
+        st["failures"] = 0
+        st["open_until"] = 0.0
 
 
 _safe_accept_encoding = None

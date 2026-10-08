@@ -56,6 +56,12 @@ DEFAULT_CONFIG = {
                                       # timeout. Different providers scale
                                       # down after very different idle
                                       # windows, so this is tunable per setup.
+    "circuit_breaker_max_failures": 2,  # after this many consecutive failures,
+                                         # stop automatic /queue and /api/jobs
+                                         # polling entirely (instead of retrying
+                                         # again after every cooldown) until a
+                                         # /prompt succeeds or state is reset.
+                                         # 0 = never latch; cooldown only.
     "models_cache": None,      # dict of {"NodeName.param": [model, ...]} pulled once from remote
     "models_cache_url": None,  # remote_url the cache was pulled from (detects URL changes)
 }

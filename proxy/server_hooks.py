@@ -491,7 +491,7 @@ def setup():
             "remote_cpu_url", "remote_cpu_auth_key",
             "post_completion_delay", "jobs_cache_max_entries",
             "gpu_keepalive_enabled", "gpu_keepalive_idle_timeout",
-            "circuit_breaker_cooldown",
+            "circuit_breaker_cooldown", "circuit_breaker_max_failures",
         }
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
@@ -525,6 +525,11 @@ def setup():
                 clean["circuit_breaker_cooldown"] = max(1, float(clean["circuit_breaker_cooldown"]))
             except (TypeError, ValueError):
                 clean.pop("circuit_breaker_cooldown", None)
+        if "circuit_breaker_max_failures" in clean:
+            try:
+                clean["circuit_breaker_max_failures"] = max(0, int(clean["circuit_breaker_max_failures"]))
+            except (TypeError, ValueError):
+                clean.pop("circuit_breaker_max_failures", None)
         if "auth_key" in clean and not clean["auth_key"]:
             clean.pop("auth_key", None)  # blank means "leave unchanged"
         if "remote_cpu_auth_key" in clean and not clean["remote_cpu_auth_key"]:
@@ -542,6 +547,7 @@ def setup():
         if url_changed:
             state.clear_all()  # a switched endpoint invalidates any tracked remote job
             jobs_cache.clear()  # ...and any cached job history from the old one
+            forwarder.circuit_reset()  # ...and any latched "remote is down" state
 
         cpu_url = (cfg.get("remote_cpu_url") or "").rstrip("/")
         gpu_url = (cfg.get("remote_url") or "").rstrip("/")
@@ -566,6 +572,7 @@ def setup():
         cleared_jobs = len(state.incomplete_ids())
         cancelled_relays = relay.cancel_all_relays()
         state.clear_all()
+        forwarder.circuit_reset()
         keepalive.stop()
         logger.info(
             f"[ComfyUI Proxy] Manual state reset: cleared {cleared_jobs} tracked job(s), "
@@ -578,6 +585,7 @@ def setup():
         relay.cancel_all_relays()
         state.clear_all()
         jobs_cache.clear()
+        forwarder.circuit_reset()
         keepalive.stop()
         cfgmod.reset_to_defaults()
         logger.info("[ComfyUI Proxy] Config reset to defaults.")
