@@ -13,6 +13,12 @@ import threading
 _PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(_PACKAGE_DIR, "proxy_config.json")
 
+# Fake GPU reported to the Crystools monitor when its /monitor/GPU request
+# stays local and this machine has no GPU (see server_hooks.py). Edit here;
+# deliberately not a saved setting and not shown in the UI panel.
+GPU_NAME = "L4"   # reported as "NVIDIA L4"
+GPU_COUNT = 1
+
 DEFAULT_CONFIG = {
     "enabled": False,          # forwarder is OFF by default
     "remote_url": "",          # the GPU endpoint, e.g. https://my-endpoint.runpod.net

@@ -31,6 +31,10 @@ Routing rules:
     GPU), but its combo/dropdown model lists are patched with the cached
     remote model list when available, so users can't pick a model that only
     exists locally and would fail when the job actually runs remotely.
+  - GET /crystools/monitor/GPU (and its /api alias) that stays local — i.e.
+    isn't forwarded because no job is active — has an empty "no GPU" answer
+    replaced with a fake GPU (config.GPU_NAME / GPU_COUNT), so Crystools'
+    GPU monitors still appear while the real GPU is remote.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -365,6 +369,49 @@ async def _handle_queue(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Crystools GPU list: when /monitor/GPU stays local and this machine has no
+# GPU, report a fake one so Crystools' GPU monitors still show up in the UI
+# (the real work happens on the remote GPU anyway).
+# ---------------------------------------------------------------------------
+
+_fake_gpu_logged = False
+
+
+def _fake_gpu_list() -> list:
+    try:
+        count = max(1, int(cfgmod.GPU_COUNT))
+    except (AttributeError, TypeError, ValueError):
+        count = 1
+    name = f"NVIDIA {getattr(cfgmod, 'GPU_NAME', 'L4')}"
+    return [{"index": i, "name": name} for i in range(count)]
+
+
+def _maybe_fake_crystools_gpu(resp: web.StreamResponse) -> web.StreamResponse:
+    """Replace an empty/'no GPU' local Crystools GPU list with the fake one.
+    Anything else (a real GPU, an error status, a streamed or unparseable
+    response) is returned untouched."""
+    global _fake_gpu_logged
+    if not isinstance(resp, web.Response) or resp.status != 200:
+        return resp
+    raw = resp.body
+    if raw is not None and not isinstance(raw, (bytes, bytearray)):
+        return resp
+    try:
+        data = json.loads(raw) if raw else None
+    except Exception:
+        return resp  # non-empty but unparseable: not ours to touch
+    if data and not (isinstance(data, list) and not data[0]):
+        return resp  # a real GPU was detected locally
+    fake = _fake_gpu_list()
+    if not _fake_gpu_logged:
+        _fake_gpu_logged = True
+        logger.info(
+            f"[ComfyUI Proxy] No local GPU detected; reporting {len(fake)}x {fake[0]['name']} to Crystools."
+        )
+    return web.json_response(fake)
+
+
+# ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
 
@@ -436,7 +483,10 @@ async def proxy_middleware(request: web.Request, handler):
                 view_local_path = None
 
     if not _is_enabled() or not _should_proxy(path):
-        return await handler(request)
+        resp = await handler(request)
+        if _is_enabled() and request.method == "GET" and canonical.rstrip("/") == "/crystools/monitor/GPU":
+            resp = _maybe_fake_crystools_gpu(resp)
+        return resp
 
     if canonical == "/prompt" and request.method == "POST":
         if not relay.has_active_relay():
