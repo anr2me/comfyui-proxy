@@ -168,9 +168,17 @@ app.registerExtension({
             "Keep GPU warm for video/image viewing",
             "Keeps the existing progress connection to the GPU open while /view or /viewvideo requests " +
             "keep arriving, so long video playback survives past the normal post-job grace window. Has a " +
-            "real cost — off by default, and only useful if you don't have a Remote CPU URL configured above."
+            "real cost — off by default, and only useful if you don't have a Remote CPU URL configured above. " +
+            "Usually unnecessary when \"Auto-download viewed input/output\" is on."
         );
         const keepaliveIdleInput = field("  View-activity idle timeout (seconds)", "number", "20");
+        // The timeout only means something while "Keep GPU warm" is on, so keep it out of sight otherwise.
+        const keepaliveIdleWrap = keepaliveIdleInput.parentElement;
+        function syncKeepaliveIdleVisibility() {
+            keepaliveIdleWrap.style.display = keepaliveInput.checked ? "" : "none";
+        }
+        keepaliveInput.addEventListener("change", syncKeepaliveIdleVisibility);
+        syncKeepaliveIdleVisibility();
 
         const statusLine = document.createElement("div");
         Object.assign(statusLine.style, { marginBottom: "8px", opacity: "0.75", fontSize: "11px", lineHeight: "1.4" });
@@ -268,6 +276,7 @@ app.registerExtension({
             autoDlInput.checked = !!cfg.auto_download_viewed;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
             keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 20;
+            syncKeepaliveIdleVisibility();
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             cpuAuthInput.placeholder = cfg.remote_cpu_auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             statusLine.textContent = cfg.remote_url
