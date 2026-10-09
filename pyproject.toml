@@ -1,9 +1,14 @@
 [project]
 name = "comfyui-proxy"
-description = "Forward ComfyUI job/output/WebSocket traffic to a configurable cloud or serverless GPU endpoint, while workflow editing stays fully local."
+description = "Forward ComfyUI job/workflow execution to a cloud/serverless GPU endpoint, while workflow editing stays fully local."
 version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies  = ['Brotli>=1.1.0','backports.zstd>=0.1.0; python_version < "3.14"']
+
+[project.urls]
+Repository = "https://github.com/anr2me/comfyui-proxy"
 
 [tool.comfy]
 PublisherId = "anr2me"
-DisplayName = "ComfyUI Proxy"
+DisplayName = "ComfyUI-Proxy"
 Icon = ""
