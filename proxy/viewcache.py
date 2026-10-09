@@ -55,12 +55,16 @@ MAP_FLUSH_BYTES = 16 * 1024 * 1024    # persist the .map at least this often whi
 MAX_CONCURRENT_FILLS = 2
 FILL_DELAY = 2.0                      # quiet period (s) before a background download starts, so a
                                       # video player's follow-up Range requests aren't fetched twice
+SCAN_DELAY = 3.0                      # quiet period (s) after the last finished file before the local
+                                      # asset scan is requested, so a burst becomes one scan
 
 _CONTENT_RANGE_RE = re.compile(r"^\s*bytes\s+(\d+)-(\d+)/(\d+)\s*$", re.I)
 
 _entries = {}        # final path -> _Entry (only while a download is in progress)
 _fill_tasks = set()
 _fill_sem = None     # created lazily, inside the running event loop
+_scan_roots = set()  # "input"/"output" folders with new files waiting for a local asset scan
+_scan_timer = None   # the pending call_later() that will request it
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +157,7 @@ class _Entry:
         self.done = False
         self.fill_task = None
         self.fill_ctx = None  # (request path, [(k, v), ...], use_cpu)
+        self.root = "output"  # which ComfyUI folder the file lives in: "input" or "output"
         self.tlock = threading.Lock()  # serializes all access to the .tmp file
         self._unsaved = 0
         self.last_activity = time.monotonic()  # last time a browser request touched this file
@@ -289,7 +294,59 @@ class _Entry:
         self.done = True
         _entries.pop(self.path, None)
         logger.info(f"[ComfyUI Proxy] Saved {self.path} locally ({self.total} bytes).")
+        _queue_asset_scan(self.root)
         return True
+
+
+# ---------------------------------------------------------------------------
+# Local asset catalogue: ask ComfyUI's own seeder to index the new file
+# ---------------------------------------------------------------------------
+
+def _queue_asset_scan(root):
+    """A file just landed in the local input/output folder. ComfyUI's asset
+    system (the catalogue the Media Assets panel reads) only learns about
+    files by scanning, and a scan normally follows a *local* job — ours run
+    remotely, so nothing would ever trigger one. Queue a scan of that folder,
+    batched: a burst of finished downloads (a panel full of thumbnails) ends
+    up as a single scan."""
+    global _scan_timer
+    if root not in ("input", "output"):
+        return
+    _scan_roots.add(root)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _run_asset_scan()
+        return
+    if _scan_timer is not None:
+        _scan_timer.cancel()
+    _scan_timer = loop.call_later(SCAN_DELAY, _run_asset_scan)
+
+
+def _run_asset_scan():
+    global _scan_timer
+    _scan_timer = None
+    roots = tuple(r for r in ("input", "output") if r in _scan_roots)
+    _scan_roots.clear()
+    if not roots:
+        return
+    try:
+        from app.assets.seeder import ScanPhase, asset_seeder
+        from comfy.cli_args import args
+    except Exception:
+        return  # this ComfyUI has no asset system
+    try:
+        if asset_seeder.is_disabled():  # --disable-assets
+            return
+        # Queued, not forced: if a scan is already running the roots are merged into it.
+        asset_seeder.enqueue_scan(
+            roots=roots,
+            phase=ScanPhase.FULL,
+            compute_hashes=bool(getattr(args, "enable_asset_hashing", False)),
+        )
+        logger.info(f"[ComfyUI Proxy] Asked ComfyUI to index the new files in your local {' and '.join(roots)} folder.")
+    except Exception as e:
+        logger.warning(f"[ComfyUI Proxy] Could not queue a local asset scan: {type(e).__name__}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +408,7 @@ def make_sink(path, request, use_cpu):
     if entry is None:
         entry = _entries[path] = _Entry(path)
     query = request.rel_url.query
+    entry.root = query.get("type", "output")
     entry.fill_ctx = (
         request.rel_url.path,
         [(k, query[k]) for k in _FILL_QUERY_KEYS if k in query],
