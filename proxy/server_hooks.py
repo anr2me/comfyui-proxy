@@ -328,6 +328,39 @@ async def _handle_prompt(request: web.Request) -> web.Response:
     return web.Response(text=text or "", status=status)
 
 
+async def _submit_prompt(request: web.Request, path: str) -> web.Response:
+    """POST /prompt. While the remote GPU wakes up (a cold start can take a
+    minute or more) the UI would otherwise show nothing at all after the user
+    presses Run, so tell it right away — through the same "status" websocket
+    message ComfyUI uses to report its queue size — how many prompts are
+    waiting to be sent. The remote's real status messages replace this once
+    the job is actually queued."""
+    try:
+        body = await request.read()  # cached, so _handle_prompt can read it again
+    except ConnectionError:
+        return await _handle_prompt(request)  # logs the disconnect, returns 499 — no point waking anything
+    try:
+        client_id = (json.loads(body) or {}).get("client_id")
+    except Exception:
+        client_id = None
+
+    relay.pending_add(client_id)
+    try:
+        if not relay.has_active_relay():
+            await relay.announce_pending(client_id)
+            await forwarder.wake_remote_if_needed(f"request to {path}")
+        resp = await _handle_prompt(request)
+    finally:
+        relay.pending_done(client_id)
+
+    if not (200 <= resp.status < 300) or not relay.has_relay_for(client_id):
+        # Nothing real will follow to replace the placeholder count (the
+        # submission failed, or there's no progress stream to report it),
+        # so put the badge back to what we actually know.
+        await relay.announce_pending(client_id)
+    return resp
+
+
 async def _handle_queue(request: web.Request) -> web.Response:
     # /queue is polled automatically and frequently by the frontend while a
     # job is incomplete — if the remote just failed, skip straight to an
@@ -513,9 +546,7 @@ async def proxy_middleware(request: web.Request, handler):
         return resp
 
     if canonical == "/prompt" and request.method == "POST":
-        if not relay.has_active_relay():
-            await forwarder.wake_remote_if_needed(f"request to {path}")
-        return await _handle_prompt(request)
+        return await _submit_prompt(request, path)
     if canonical == "/queue" and request.method == "GET":
         if not relay.has_active_relay():
             await forwarder.wake_remote_if_needed(f"request to {path}")

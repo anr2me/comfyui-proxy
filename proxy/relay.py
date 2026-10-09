@@ -29,11 +29,18 @@ Flow, per the intended sequence:
      a configurable delay (default 5s) before unsubscribing logs and closing
      the shadow connection, so in-flight progress/log animations (and the
      final "Prompt executed in ..." log line) still reach the UI.
+
+Before step 1 can even happen (the remote may still be cold-booting),
+announce_pending() sends the browser a locally generated "status" message
+with the number of waiting /prompt submissions as queue_remaining, so
+pressing Run gives immediate feedback; the remote's real status messages
+take over once the job is queued.
 """
 
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
@@ -49,6 +56,7 @@ logger = logging.getLogger("ComfyUIProxy")
 
 _relay_tasks = {}   # client_id -> asyncio.Task
 _ready_events = {}  # client_id -> asyncio.Event, set once shadow ws is up (or failed)
+_pending_prompts = {}  # client_id -> /prompt submissions still waiting on the remote
 
 _COMPLETION_MSG_TYPES = {"execution_success", "execution_error", "execution_interrupted"}
 
@@ -94,6 +102,65 @@ def has_active_relay() -> bool:
     remote — i.e. we already know for a fact the remote is awake, so there's
     no need to separately ping it to check readiness or log about it."""
     return any(not t.done() for t in _relay_tasks.values())
+
+
+# --- "Run" feedback while the remote is still waking up -------------------
+# A cold start can take a minute or more, during which the UI would show
+# nothing at all after the user presses Run. These track how many /prompt
+# submissions are waiting on the remote per client, and let us tell the
+# browser about them through a locally generated "status" message — the same
+# message type ComfyUI uses to report its queue size — until the remote's own
+# (real) status messages take over once the job is actually queued.
+
+def pending_count(client_id) -> int:
+    return _pending_prompts.get(client_id, 0) if client_id else 0
+
+
+def pending_add(client_id):
+    if client_id:
+        _pending_prompts[client_id] = _pending_prompts.get(client_id, 0) + 1
+
+
+def pending_done(client_id):
+    if not client_id:
+        return
+    left = _pending_prompts.get(client_id, 0) - 1
+    if left > 0:
+        _pending_prompts[client_id] = left
+    else:
+        _pending_prompts.pop(client_id, None)
+
+
+def has_relay_for(client_id) -> bool:
+    task = _relay_tasks.get(client_id)
+    return task is not None and not task.done()
+
+
+async def announce_pending(client_id):
+    """Show the browser the queue size we expect: submissions still waiting
+    on the remote plus jobs already tracked as running there for it."""
+    if not client_id:
+        return
+    queue_remaining = pending_count(client_id) + state.incomplete_count_for_client(client_id)
+    fake = {"type": "status", "data": {"status": {"exec_info": {"queue_remaining": queue_remaining}}}}
+    await _inject_local(client_id, SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=json.dumps(fake)))
+
+
+def _keep_pending_count(client_id, parsed, msg):
+    """The remote's very first "status" message (sent as soon as the shadow
+    socket connects, before the prompt has been submitted) reports an empty
+    queue. Relayed as-is it would flip the badge shown by announce_pending()
+    back to 0 until the prompt is really queued, so raise it to the number
+    of submissions still waiting. Any other message is returned untouched."""
+    pending = pending_count(client_id)
+    if pending <= 0 or not isinstance(parsed, dict) or parsed.get("type") != "status":
+        return msg
+    try:
+        exec_info = parsed["data"].setdefault("status", {}).setdefault("exec_info", {})
+        exec_info["queue_remaining"] = max(pending, int(exec_info.get("queue_remaining") or 0))
+    except Exception:
+        return msg
+    return SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=json.dumps(parsed))
 
 
 def cancel_all_relays() -> int:
@@ -263,7 +330,7 @@ async def _run_relay(client_id: str):
                             logger.info(f"[ComfyUI Proxy] Remote GPU progress stream ready for client {client_id}.")
                         asyncio.ensure_future(_subscribe_logs(base, headers, timeout, client_id, True))
                         _signal_ready(client_id)
-                        await _inject_local(client_id, msg)
+                        await _inject_local(client_id, _keep_pending_count(client_id, parsed, msg))
                         continue
 
                     await _inject_local(client_id, msg)
