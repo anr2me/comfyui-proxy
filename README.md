@@ -53,34 +53,39 @@ Tap the pill, then the label, to open the panel.
   capacity is scarce, so this defaults fairly high (300s). Raise it if you
   see timeout errors right after queuing a prompt.
 - **Post-completion delay** — after a job finishes, keeps the live progress
-  connection open a few extra seconds so the progress bar and logs finish
-  animating smoothly before disconnecting.
+  connection open a few extra seconds so the progress bar and the final log
+  lines (like "Prompt executed in …") finish arriving before disconnecting.
 - **Job history cache size** — how many recently-viewed job history pages
   to remember locally, so the Media Assets panel can still show something
   useful without needing to contact the remote.
 - **Unresponsive-GPU polling cooldown** — if the remote stops responding
   entirely, pauses automatic background checks for this many seconds before
   trying again, so a broken connection doesn't keep your serverless
-  instance looking "busy" forever. If your provider takes longer than the
-  default (30s) to actually shut down an idle instance, raise this.
+  instance looking "busy" forever. If it still doesn't answer the next
+  time, the proxy stops checking until you queue a new prompt or use
+  **Clear Stuck State**. If your provider takes longer than the default
+  (30s) to actually shut down an idle instance, raise this.
 - **Auto-download viewed input/output** *(off by default)* — saves the
   images and videos you view in the Media Assets panel to your local
   `output` / `input` folder. Once a file is saved, it's shown from your own
   computer, so switching browser tabs or reopening the panel no longer
   wakes the remote just to redraw thumbnails. Big files finish downloading
   in the background and pick up where they left off if interrupted (you may
-  briefly see `.tmp` / `.map` files next to them). If a local file with the
-  same name already exists, it's used as-is.
+  briefly see `.tmp` / `.map` files next to them), and the connection to the
+  GPU stays open until they're done. ComfyUI is also asked to add the new
+  files to your local Assets list. If a local file with the same name
+  already exists, it's used as-is.
 - **Keep GPU warm for video/image viewing** *(off by default)* — only
-  relevant if you don't have a Remote CPU URL. Normally, once a job
+  relevant if you don't have a Remote CPU URL, and usually unnecessary if
+  **Auto-download viewed input/output** is on. Normally, once a job
   finishes, the connection to the GPU closes after a few seconds and the
   GPU can shut down — which can cut off a video you're still watching.
   Turning this on keeps that connection open for as long as you keep
-  viewing images/videos (up to the **View-activity idle timeout** below),
-  so playback doesn't get cut off. This has a real cost, since it keeps
-  paying for the GPU while you're watching.
-  - **View-activity idle timeout** — how long to keep the connection open
-    after the last time you viewed something, before giving up.
+  viewing images/videos, so playback doesn't get cut off. This has a real
+  cost, since it keeps paying for the GPU while you're watching.
+  - **View-activity idle timeout** *(appears once the option above is
+    ticked)* — how long to keep the connection open after the last time
+    you viewed something, before giving up.
 
 ## What happens automatically
 
@@ -89,22 +94,32 @@ Tap the pill, then the label, to open the panel.
 - The remote is only woken up when you queue a prompt, check the queue, or
   (if configured) when something actually needs to upload/view a file and
   no separate CPU endpoint is available.
+- If you press **Run** while the GPU is still starting up, your job shows
+  up in the queue straight away, so you know the click registered. The real
+  progress takes over once the GPU is ready.
 - Just opening panels like job history or logs never wakes the GPU on its
   own — if nothing's running, you'll see locally-cached information instead
   of the proxy reaching out and spinning something up just to look.
 - Once a job finishes, the proxy keeps things open just long enough for the
-  progress bar to finish, then disconnects — unless you've turned on the
-  video keep-alive option above.
+  progress bar and final log lines to arrive, then disconnects — unless a
+  file you viewed is still being auto-downloaded (it waits for that to
+  finish) or you've turned on **Keep GPU warm**.
 - Model/checkpoint dropdowns are refreshed from the remote once (and
   whenever you change the URL), so you don't see models that only exist on
   your remote machine as available locally, or vice versa. You may need to refresh the ComfyUI browser tab for the models list changes to reflects on dropdowns.
+- If your computer has no GPU of its own, the Crystools resource monitor
+  lists a placeholder one (an NVIDIA L4 by default) so its GPU meters still
+  appear; while a job runs it shows the remote GPU's real readings. To
+  change the placeholder, edit `GPU_NAME` and `GPU_COUNT` near the top of
+  `proxy/config.py`.
 
 ## If something seems stuck
 
 Open the panel and use:
 - **Clear Stuck State** — tells the proxy to forget about any job or
   connection it thinks is still active, without needing to restart ComfyUI.
-  Use this if queuing a new prompt seems to hang or do nothing.
+  Use this if queuing a new prompt seems to hang or do nothing, or if the
+  proxy gave up checking an unresponsive GPU and you want it to try again.
 - **Reset to Defaults** — resets every setting above back to its default
   (and turns the proxy off). Asks for confirmation first, since it clears
   your saved URLs and keys too.
