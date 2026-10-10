@@ -16,10 +16,11 @@ Routing rules:
     cold start on their own (e.g. opening the logs console while idle).
     Older remote job history simply won't show once the relay has closed;
     this is a deliberate cost/idle-wake tradeoff, not a bug.
-  - /api/jobs is handled specially: fetched fresh (and cached) whenever the
-    remote is known active, served from a small local response cache
-    otherwise — so the Media Assets panel can still show recent history
-    while idle without ever waking the remote just to browse it.
+  - /api/jobs is handled specially (see jobs_cache.py): finished jobs are
+    saved in a local database (jobs_history.db) whenever the remote is
+    reached, and the job list is rebuilt from it — so the Media Assets panel
+    keeps showing history across restarts, of ComfyUI and of the remote,
+    without waking the remote just to browse it.
   - /ws is NEVER proxied as an HTTP route: the browser's websocket connection
     is opened once at page load and can't be redirected after the fact.
     Instead, submitting /prompt opens a dedicated shadow websocket from the
@@ -501,10 +502,10 @@ async def proxy_middleware(request: web.Request, handler):
             return resp
         return await handler(request)  # nothing cached; let local take it
 
-    # POST /history (or /api/history) with {"clear": true} is the frontend
-    # clearing completed/failed job history — invalidate our local job-list
-    # cache too, regardless of whether this particular request ends up
-    # reaching the remote, so cleared entries don't keep showing up from it.
+    # POST /history (or /api/history) with {"clear": true} or {"delete": [ids]}
+    # is the frontend removing completed/failed jobs from the history — forget
+    # them in our saved job history too, regardless of whether this particular
+    # request ends up reaching the remote, so they don't keep showing up.
     # request.read() caches its result, so peeking here doesn't disturb
     # downstream handling (local or forwarded) reading the body again later.
     if _is_enabled() and request.method == "POST" and (canonical == "/history" or canonical.startswith("/history/")):
@@ -514,8 +515,10 @@ async def proxy_middleware(request: web.Request, handler):
         except Exception:
             payload = {}
         if isinstance(payload, dict) and payload.get("clear") is True:
-            jobs_cache.clear()
-            logger.info(f"[ComfyUI Proxy] Cleared local job history cache ({path}, clear=true).")
+            await jobs_cache.clear()
+            logger.info(f"[ComfyUI Proxy] Cleared saved job history ({path}, clear=true).")
+        if isinstance(payload, dict) and isinstance(payload.get("delete"), list):
+            await jobs_cache.forget(payload["delete"])
 
     # "Auto-download viewed input/output": a /view file that's already on disk
     # is served by ComfyUI's own /view handler (so no remote is involved at
@@ -615,7 +618,7 @@ def setup():
         allowed = {
             "enabled", "remote_url", "timeout", "auth_key",
             "remote_cpu_url", "remote_cpu_auth_key",
-            "post_completion_delay", "jobs_cache_max_entries",
+            "post_completion_delay", "jobs_history_max_entries",
             "gpu_keepalive_enabled", "gpu_keepalive_idle_timeout",
             "circuit_breaker_cooldown", "circuit_breaker_max_failures",
             "auto_download_viewed",
@@ -635,11 +638,11 @@ def setup():
                 clean["post_completion_delay"] = max(0, float(clean["post_completion_delay"]))
             except (TypeError, ValueError):
                 clean.pop("post_completion_delay", None)
-        if "jobs_cache_max_entries" in clean:
+        if "jobs_history_max_entries" in clean:
             try:
-                clean["jobs_cache_max_entries"] = max(1, int(clean["jobs_cache_max_entries"]))
+                clean["jobs_history_max_entries"] = max(1, int(clean["jobs_history_max_entries"]))
             except (TypeError, ValueError):
-                clean.pop("jobs_cache_max_entries", None)
+                clean.pop("jobs_history_max_entries", None)
         if "auto_download_viewed" in clean:
             clean["auto_download_viewed"] = bool(clean["auto_download_viewed"])
         if "gpu_keepalive_enabled" in clean:
@@ -677,7 +680,7 @@ def setup():
 
         if url_changed:
             state.clear_all()  # a switched endpoint invalidates any tracked remote job
-            jobs_cache.clear()  # ...and any cached job history from the old one
+            # (saved job history is kept per remote URL, so there's nothing to clear for it)
             forwarder.circuit_reset()  # ...and any latched "remote is down" state
 
         cpu_url = (cfg.get("remote_cpu_url") or "").rstrip("/")
@@ -716,7 +719,6 @@ def setup():
     async def _reset_config(request):
         relay.cancel_all_relays()
         state.clear_all()
-        jobs_cache.clear()
         forwarder.circuit_reset()
         viewcache.cancel_all()
         keepalive.stop()

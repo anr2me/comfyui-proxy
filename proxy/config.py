@@ -12,6 +12,9 @@ import threading
 
 _PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(_PACKAGE_DIR, "proxy_config.json")
+# Saved job history (see jobs_db.py). Kept in the node folder, like the config,
+# so a fork that changes the database layout keeps its own separate file.
+JOBS_DB_PATH = os.path.join(_PACKAGE_DIR, "jobs_history.db")
 
 # Fake GPU reported to the Crystools monitor when its /monitor/GPU request
 # stays local and this machine has no GPU (see server_hooks.py). Edit here;
@@ -36,8 +39,8 @@ DEFAULT_CONFIG = {
                                   # a job finishes, so the UI's progress bar/log
                                   # animations have time to reach 100% before we
                                   # tear the shadow connection down
-    "jobs_cache_max_entries": 64,  # max distinct /api/jobs path+query variants
-                                    # to keep cached locally (oldest evicted first)
+    "jobs_history_max_entries": 500,  # finished jobs to remember in jobs_history.db
+                                       # per remote URL (oldest dropped first)
     "auto_download_viewed": False,  # opt-in: save files viewed via /view
                                      # (type=output/input) into the local
                                      # output/input folder and serve them from

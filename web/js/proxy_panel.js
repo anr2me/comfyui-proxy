@@ -145,7 +145,10 @@ app.registerExtension({
         const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
         const timeoutInput = field("Timeout (seconds)", "number", "300");
         const delayInput = field("Post-completion delay (seconds)", "number", "5");
-        const jobsCacheInput = field("Job history cache size", "number", "64");
+        const jobsHistoryInput = field("Saved job history size (jobs)", "number", "500");
+        jobsHistoryInput.title =
+            "How many finished jobs to remember on this computer (in jobs_history.db), so the Media " +
+            "Assets panel still lists them after ComfyUI or the remote restarts. Oldest are dropped first.";
         const circuitCooldownInput = field(
             "Unresponsive-GPU polling cooldown (seconds)", "number", "30"
         );
@@ -216,7 +219,7 @@ app.registerExtension({
         panel.appendChild(resetBtn);
 
         const resetConfigBtn = mkButton("Reset to Defaults");
-        resetConfigBtn.title = "Resets URL, timeout, delay, cache size, and auth key back to their defaults";
+        resetConfigBtn.title = "Resets URL, timeout, delay, history size, and auth key back to their defaults";
         Object.assign(resetConfigBtn.style, { width: "100%", marginTop: "6px", background: "#4a2a2a" });
         resetConfigBtn.onmouseenter = () => (resetConfigBtn.style.background = "#5a3333");
         resetConfigBtn.onmouseleave = () => (resetConfigBtn.style.background = "#4a2a2a");
@@ -271,7 +274,7 @@ app.registerExtension({
             cpuUrlInput.value = cfg.remote_cpu_url || "";
             timeoutInput.value = cfg.timeout || 300;
             delayInput.value = cfg.post_completion_delay ?? 5;
-            jobsCacheInput.value = cfg.jobs_cache_max_entries ?? 64;
+            jobsHistoryInput.value = cfg.jobs_history_max_entries ?? 500;
             circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? 30;
             autoDlInput.checked = !!cfg.auto_download_viewed;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
@@ -312,14 +315,14 @@ app.registerExtension({
                 remote_cpu_url: cpuUrlInput.value.trim(),
                 timeout: parseFloat(timeoutInput.value) || 300,
                 post_completion_delay: parseFloat(delayInput.value),
-                jobs_cache_max_entries: parseInt(jobsCacheInput.value, 10),
+                jobs_history_max_entries: parseInt(jobsHistoryInput.value, 10),
                 circuit_breaker_cooldown: parseFloat(circuitCooldownInput.value),
                 auto_download_viewed: autoDlInput.checked,
                 gpu_keepalive_enabled: keepaliveInput.checked,
                 gpu_keepalive_idle_timeout: parseFloat(keepaliveIdleInput.value),
             };
             if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = 5;
-            if (isNaN(patch.jobs_cache_max_entries) || patch.jobs_cache_max_entries < 1) patch.jobs_cache_max_entries = 64;
+            if (isNaN(patch.jobs_history_max_entries) || patch.jobs_history_max_entries < 1) patch.jobs_history_max_entries = 500;
             if (isNaN(patch.circuit_breaker_cooldown) || patch.circuit_breaker_cooldown < 1) patch.circuit_breaker_cooldown = 30;
             if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = 20;
             if (authInput.value.trim()) {
@@ -378,7 +381,7 @@ app.registerExtension({
         });
 
         resetConfigBtn.addEventListener("click", async () => {
-            if (!confirm("Reset both remote URLs, timeout, delay, cache size, polling cooldown, keep-alive settings, and both auth keys back to their defaults? This also disables the proxy.")) {
+            if (!confirm("Reset both remote URLs, timeout, delay, history size, polling cooldown, keep-alive settings, and both auth keys back to their defaults? This also disables the proxy.")) {
                 return;
             }
             resetConfigBtn.textContent = "Resetting...";

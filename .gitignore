@@ -1,0 +1,6 @@
+# Saved job history (created next to proxy_config.json; see proxy/jobs_db.py)
+jobs_history.db
+jobs_history.db-wal
+jobs_history.db-shm
+# Old databases set aside when their layout doesn't match this version
+jobs_history.db.*.bak*

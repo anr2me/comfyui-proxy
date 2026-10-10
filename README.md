@@ -55,9 +55,12 @@ Tap the pill, then the label, to open the panel.
 - **Post-completion delay** — after a job finishes, keeps the live progress
   connection open a few extra seconds so the progress bar and the final log
   lines (like "Prompt executed in …") finish arriving before disconnecting.
-- **Job history cache size** — how many recently-viewed job history pages
-  to remember locally, so the Media Assets panel can still show something
-  useful without needing to contact the remote.
+- **Saved job history size** — how many finished jobs to remember on your
+  computer (500 by default). They're kept in `jobs_history.db` inside this
+  folder, separately for each Remote GPU URL, so the Media Assets panel
+  still lists your older jobs after ComfyUI or the remote restarts, without
+  waking the remote. Deleting or clearing jobs in the panel removes them
+  from it too.
 - **Unresponsive-GPU polling cooldown** — if the remote stops responding
   entirely, pauses automatic background checks for this many seconds before
   trying again, so a broken connection doesn't keep your serverless
@@ -98,8 +101,9 @@ Tap the pill, then the label, to open the panel.
   up in the queue straight away, so you know the click registered. The real
   progress takes over once the GPU is ready.
 - Just opening panels like job history or logs never wakes the GPU on its
-  own — if nothing's running, you'll see locally-cached information instead
-  of the proxy reaching out and spinning something up just to look.
+  own — if nothing's running, you'll see what's saved on your computer (like
+  your job history) instead of the proxy reaching out and spinning something
+  up just to look.
 - Once a job finishes, the proxy keeps things open just long enough for the
   progress bar and final log lines to arrive, then disconnects — unless a
   file you viewed is still being auto-downloaded (it waits for that to
