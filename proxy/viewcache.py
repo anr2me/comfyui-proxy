@@ -158,6 +158,7 @@ class _Entry:
         self.fill_task = None
         self.fill_ctx = None  # (request path, [(k, v), ...], use_cpu)
         self.root = "output"  # which ComfyUI folder the file lives in: "input" or "output"
+        self.streams = 0      # browser responses for this file being streamed right now
         self.tlock = threading.Lock()  # serializes all access to the .tmp file
         self._unsaved = 0
         self.last_activity = time.monotonic()  # last time a browser request touched this file
@@ -363,11 +364,15 @@ class _Sink:
         self.wanted = False  # a successful response: worth finishing in the background
         self.tee = False     # this response's bytes can be written into the cache directly
         self.pos = 0
+        self.counted = False  # holds a count on entry.streams until end()
 
     def begin(self, status, headers):
         e = self.entry
         self.status = status
         self.wanted = status in (200, 206) and not e.failed and not e.done
+        if self.wanted:
+            e.streams += 1
+            self.counted = True
         if not self.wanted or self.transformed:
             return False
         parsed = _parse_response(status, headers)
@@ -390,6 +395,9 @@ class _Sink:
         """Synchronous on purpose: runs in a `finally`, possibly while the
         request is being cancelled."""
         e = self.entry
+        if self.counted:
+            self.counted = False
+            e.streams = max(0, e.streams - 1)
         if e.failed or e.done:
             return
         e.last_activity = time.monotonic()
@@ -435,6 +443,22 @@ def cancel_all():
     / state reset). Partial files and their .map stay for a later resume."""
     for task in list(_fill_tasks):
         task.cancel()
+
+
+def has_active_downloads(use_cpu=False):
+    """True while a viewed file that isn't fully local yet is still coming
+    from the given target (the GPU by default): a browser response is being
+    streamed into it, or its background download is queued or running.
+    relay.py keeps its connection to the GPU open for as long as this is
+    true, so /view keeps being forwarded and the GPU stays up until the file
+    is safely on disk. A failed or finished file never counts, so this can't
+    hold the connection open forever."""
+    for e in _entries.values():
+        if e.failed or e.done or e.fill_ctx is None or e.fill_ctx[2] != use_cpu:
+            continue
+        if e.streams > 0 or (e.fill_task is not None and not e.fill_task.done()):
+            return True
+    return False
 
 
 async def _fill(entry):

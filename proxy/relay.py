@@ -51,6 +51,7 @@ from . import forwarder
 from . import jobs_cache
 from . import keepalive
 from . import state
+from . import viewcache
 
 logger = logging.getLogger("ComfyUIProxy")
 
@@ -59,6 +60,8 @@ _ready_events = {}  # client_id -> asyncio.Event, set once shadow ws is up (or f
 _pending_prompts = {}  # client_id -> /prompt submissions still waiting on the remote
 
 _COMPLETION_MSG_TYPES = {"execution_success", "execution_error", "execution_interrupted"}
+
+MAX_DOWNLOAD_KEEP_OPEN = 1800.0  # never hold the connection open longer than this just for file downloads
 
 
 def _ws_target_url(base: str, path: str, query: str) -> str:
@@ -261,31 +264,48 @@ async def _relay_for(ws_remote, client_id: str, seconds: float) -> bool:
 
 
 async def _extend_for_view_activity(client_id: str, ws_remote):
-    """Keep this relay's already-open websocket connection alive for as
-    long as /view or /viewvideo requests keep arriving for it, instead of
-    pinging separately: an open, pending connection is what actually counts
-    as "busy" to a scale-to-zero serverless platform, not a brief ping that
-    completes and is forgotten the instant it returns. Returns once there's
-    been no view activity for the configured idle timeout."""
+    """Keep this relay's already-open websocket connection alive after the
+    last job, instead of pinging separately: an open, pending connection is
+    what actually counts as "busy" to a scale-to-zero serverless platform,
+    not a brief ping that completes and is forgotten the instant it returns.
+    Held open for as long as either
+      - a viewed file is still being downloaded from the GPU (Auto-download,
+        see viewcache.py): /view keeps being forwarded, and the GPU isn't
+        shut down underneath the download, until the file is saved locally
+        (capped at MAX_DOWNLOAD_KEEP_OPEN so a stuck download can't pin the
+        GPU forever), or
+      - the opt-in "Keep GPU warm" option is on and /view or /viewvideo
+        requests keep arriving (until the configured idle timeout).
+    Returns once neither applies, or when the remote closes the socket."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     timeout = keepalive.idle_timeout()
-    poll_interval = min(10.0, timeout)
-    logger.info(
-        f"[ComfyUI Proxy] Keeping progress stream open for client {client_id} while /view activity "
-        f"continues (idle timeout {timeout:g}s)..."
-    )
+    capped = False
+    reason = None
     while True:
-        idle_for = keepalive.seconds_since_last_view()
-        remaining = timeout - idle_for
-        if remaining <= 0:
+        downloading = not capped and viewcache.has_active_downloads()
+        if downloading and loop.time() - started > MAX_DOWNLOAD_KEEP_OPEN:
+            capped = True
+            downloading = False
+            logger.warning(
+                f"[ComfyUI Proxy] File downloads are still running after {MAX_DOWNLOAD_KEEP_OPEN:g}s; "
+                f"not holding the progress stream open for client {client_id} any longer."
+            )
+        idle_left = 0.0
+        if keepalive.enabled():
+            idle_left = timeout - keepalive.seconds_since_last_view()
+        if not downloading and idle_left <= 0:
             logger.info(
-                f"[ComfyUI Proxy] No /view activity for client {client_id} in the last {timeout:g}s; "
-                "ending keep-alive extension."
+                f"[ComfyUI Proxy] No file downloads in progress and no recent /view activity "
+                f"for client {client_id}; ending extension."
             )
             return
-        if not keepalive.enabled():
-            logger.info(f"[ComfyUI Proxy] GPU keep-alive disabled; ending extension for client {client_id}.")
-            return
-        if await _relay_for(ws_remote, client_id, min(poll_interval, remaining)):
+        why = "a file download is in progress" if downloading else f"/view activity continues (idle timeout {timeout:g}s)"
+        if why != reason:
+            reason = why
+            logger.info(f"[ComfyUI Proxy] Keeping progress stream open for client {client_id}: {why}...")
+        step = 2.0 if downloading else min(10.0, idle_left)
+        if await _relay_for(ws_remote, client_id, step):
             logger.info(f"[ComfyUI Proxy] Remote closed the progress stream for client {client_id}; ending extension.")
             return
 
@@ -394,7 +414,7 @@ async def _run_relay(client_id: str):
                                     "period; keeping the progress stream open instead of closing it."
                                 )
                             else:
-                                if keepalive.enabled():
+                                if keepalive.enabled() or viewcache.has_active_downloads():
                                     await _extend_for_view_activity(client_id, ws_remote)
                                 # The extension above can run for a while —
                                 # a prompt could have been resubmitted during
