@@ -22,6 +22,12 @@ JOBS_DB_PATH = os.path.join(_PACKAGE_DIR, "jobs_history.db")
 GPU_NAME = "L4"   # reported as "NVIDIA L4"
 GPU_COUNT = 1
 
+# Placeholder jobs shown in the UI's queue while a prompt waits for the remote GPU
+# to wake up (see placeholders.py) normally disappear as soon as that submission
+# finishes, fails or is cancelled. As a safety net they also expire on their own:
+# after the Timeout setting plus this many seconds. Edit here; not shown in the UI.
+QUEUE_PLACEHOLDER_MARGIN = 60
+
 DEFAULT_CONFIG = {
     "enabled": False,          # forwarder is OFF by default
     "remote_url": "",          # the GPU endpoint, e.g. https://my-endpoint.runpod.net

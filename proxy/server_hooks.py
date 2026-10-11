@@ -21,6 +21,10 @@ Routing rules:
     reached, and the job list is rebuilt from it — so the Media Assets panel
     keeps showing history across restarts, of ComfyUI and of the remote,
     without waking the remote just to browse it.
+  - While the remote GPU is still waking up, each submitted /prompt shows up
+    in the UI's Job Queue as a placeholder pending job ("Waiting for a
+    machine"; see placeholders.py) instead of nothing happening — and it can
+    be cancelled there without waking the GPU.
   - /ws is NEVER proxied as an HTTP route: the browser's websocket connection
     is opened once at page load and can't be redirected after the fact.
     Instead, submitting /prompt opens a dedicated shadow websocket from the
@@ -60,6 +64,7 @@ from . import forwarder
 from . import jobs_cache
 from . import keepalive
 from . import models_cache
+from . import placeholders
 from . import relay
 from . import state
 from . import viewcache
@@ -332,34 +337,86 @@ async def _handle_prompt(request: web.Request) -> web.Response:
 async def _submit_prompt(request: web.Request, path: str) -> web.Response:
     """POST /prompt. While the remote GPU wakes up (a cold start can take a
     minute or more) the UI would otherwise show nothing at all after the user
-    presses Run, so tell it right away — through the same "status" websocket
-    message ComfyUI uses to report its queue size — how many prompts are
-    waiting to be sent. The remote's real status messages replace this once
-    the job is actually queued."""
+    presses Run. So each submission that has to wait is registered as a
+    placeholder pending job (placeholders.py): the Job Queue lists it right
+    away, marked "Waiting for a machine", and the queue count follows. It is
+    removed again as soon as the submission finishes — the real job then shows
+    up from the remote — fails, or is cancelled by the user."""
     try:
         body = await request.read()  # cached, so _handle_prompt can read it again
     except ConnectionError:
         return await _handle_prompt(request)  # logs the disconnect, returns 499 — no point waking anything
+    client_id = workflow_id = None
     try:
-        client_id = (json.loads(body) or {}).get("client_id")
+        payload = json.loads(body) or {}
+        client_id = payload.get("client_id")
+        workflow_id = (((payload.get("extra_data") or {}).get("extra_pnginfo") or {}).get("workflow") or {}).get("id")
     except Exception:
-        client_id = None
+        pass
+    if not isinstance(workflow_id, str):
+        workflow_id = None
 
     relay.pending_add(client_id)
+    ph = None
     try:
         if not relay.has_active_relay():
-            await relay.announce_pending(client_id)
+            ph = placeholders.add(client_id, workflow_id)
+            await relay.announce_waiting(client_id, ph.id)
+            await relay.announce_pending()
             await forwarder.wake_remote_if_needed(f"request to {path}")
-        resp = await _handle_prompt(request)
+        if ph is not None and ph.cancelled:
+            # Cancelled in the Job Queue while the GPU was starting: nothing was
+            # sent, and there is no job to report — an empty prompt_id is
+            # answered without an error, so the UI just carries on.
+            logger.info("[ComfyUI Proxy] Prompt cancelled while the remote GPU was starting; not submitting it.")
+            resp = web.json_response({"prompt_id": "", "number": 0, "node_errors": {}})
+        else:
+            resp = await _handle_prompt(request)
     finally:
         relay.pending_done(client_id)
+        if ph is not None:
+            placeholders.remove(ph.id)
 
-    if not (200 <= resp.status < 300) or not relay.has_relay_for(client_id):
-        # Nothing real will follow to replace the placeholder count (the
-        # submission failed, or there's no progress stream to report it),
-        # so put the badge back to what we actually know.
-        await relay.announce_pending(client_id)
+    if ph is not None or not (200 <= resp.status < 300) or not relay.has_relay_for(client_id):
+        # The placeholder is gone (replaced by the real job on success), or
+        # nothing real will follow to replace the count (the submission
+        # failed, or there's no progress stream to report it): refresh the
+        # UI's queue, which puts it back to exactly what is really queued.
+        await relay.announce_pending()
     return resp
+
+
+async def _cancel_queue_placeholders(request: web.Request, canonical: str):
+    """POST /queue {"delete": [ids]} (cancelling one queued job in the Job
+    Queue) or {"clear": true} ("Clear queue"), for the placeholder jobs that
+    are waiting for the remote GPU. They're cancelled here: the submission
+    waiting on the GPU then doesn't send its prompt. When that's all the
+    request was about, it's answered locally — forwarding it would wake the GPU
+    just to cancel something it never received. None means "carry on as usual"
+    (nothing of ours in it, or real jobs to forward it for)."""
+    if canonical != "/queue" or not placeholders.count():
+        return None
+    try:
+        body = await request.read()  # cached for any later reader
+        payload = json.loads(body) if body else {}
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    ids = payload.get("delete") if isinstance(payload.get("delete"), list) else []
+    clear = payload.get("clear") is True
+    cancelled = [ph for ph in (placeholders.cancel(i) for i in ids) if ph is not None]
+    if clear:
+        cancelled += placeholders.cancel_all()
+    if not cancelled:
+        return None
+    logger.info(f"[ComfyUI Proxy] Cancelled {len(cancelled)} queued job(s) that were still waiting for the remote GPU.")
+    await relay.announce_pending()
+    done = {ph.id for ph in cancelled}
+    other_ids = [i for i in ids if i not in done]
+    if not other_ids and (not clear or not _remote_known_active()):
+        return web.Response(status=200)
+    return None
 
 
 async def _handle_queue(request: web.Request) -> web.Response:
@@ -519,6 +576,15 @@ async def proxy_middleware(request: web.Request, handler):
             logger.info(f"[ComfyUI Proxy] Cleared saved job history ({path}, clear=true).")
         if isinstance(payload, dict) and isinstance(payload.get("delete"), list):
             await jobs_cache.forget(payload["delete"])
+
+    # A queued job that is still waiting for the remote GPU (placeholders.py)
+    # being cancelled — the Job Queue's cancel button, or "Clear queue". Answered
+    # right here when that is all the request is about, so that cancelling
+    # doesn't wake the GPU.
+    if _is_enabled() and request.method == "POST":
+        resp = await _cancel_queue_placeholders(request, canonical)
+        if resp is not None:
+            return resp
 
     # "Auto-download viewed input/output": a /view file that's already on disk
     # is served by ComfyUI's own /view handler (so no remote is involved at
@@ -708,6 +774,8 @@ def setup():
         state.clear_all()
         forwarder.circuit_reset()
         viewcache.cancel_all()
+        if placeholders.cancel_all():
+            await relay.announce_pending()  # take the waiting jobs out of the UI's queue too
         keepalive.stop()
         logger.info(
             f"[ComfyUI Proxy] Manual state reset: cleared {cleared_jobs} tracked job(s), "
@@ -721,6 +789,8 @@ def setup():
         state.clear_all()
         forwarder.circuit_reset()
         viewcache.cancel_all()
+        if placeholders.cancel_all():
+            await relay.announce_pending()  # take the waiting jobs out of the UI's queue too
         keepalive.stop()
         cfgmod.reset_to_defaults()
         logger.info("[ComfyUI Proxy] Config reset to defaults.")

@@ -30,11 +30,12 @@ Flow, per the intended sequence:
      the shadow connection, so in-flight progress/log animations (and the
      final "Prompt executed in ..." log line) still reach the UI.
 
-Before step 1 can even happen (the remote may still be cold-booting),
-announce_pending() sends the browser a locally generated "status" message
-with the number of waiting /prompt submissions as queue_remaining, so
-pressing Run gives immediate feedback; the remote's real status messages
-take over once the job is queued.
+Before step 1 can even happen (the remote may still be cold-booting), each
+waiting /prompt submission is shown in the UI's Job Queue as a placeholder job
+(placeholders.py): announce_waiting() marks it "Waiting for a machine", and
+announce_pending() sends the browser a locally generated "status" message,
+which makes the frontend re-fetch its job list. The remote's real status
+messages and jobs take over once the prompt is queued.
 """
 
 import asyncio
@@ -50,6 +51,7 @@ from . import config as cfgmod
 from . import forwarder
 from . import jobs_cache
 from . import keepalive
+from . import placeholders
 from . import state
 from . import viewcache
 
@@ -139,14 +141,43 @@ def has_relay_for(client_id) -> bool:
     return task is not None and not task.done()
 
 
-async def announce_pending(client_id):
-    """Show the browser the queue size we expect: submissions still waiting
-    on the remote plus jobs already tracked as running there for it."""
-    if not client_id:
-        return
-    queue_remaining = pending_count(client_id) + state.incomplete_count_for_client(client_id)
-    fake = {"type": "status", "data": {"status": {"exec_info": {"queue_remaining": queue_remaining}}}}
-    await _inject_local(client_id, SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=json.dumps(fake)))
+def _local_clients() -> list:
+    try:
+        return list(PromptServer.instance.sockets)
+    except AttributeError:
+        return []
+
+
+async def _send_to_browsers(payload: dict, client_id=None):
+    """Push a locally generated websocket message to one browser (client_id)
+    or, without one, to every browser currently connected."""
+    msg = SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data=json.dumps(payload))
+    for cid in ([client_id] if client_id else _local_clients()):
+        await _inject_local(cid, msg)
+
+
+async def announce_pending(client_id=None):
+    """Tell the browser(s) the queue size we expect: jobs waiting on the
+    remote (placeholders.py) plus jobs already tracked as running there. It is
+    the "status" message ComfyUI itself uses, and the frontend answers it by
+    re-fetching its job list — so this is also what makes placeholder jobs
+    appear in the Job Queue, and disappear again once they're removed."""
+    queue_remaining = placeholders.count() + len(state.incomplete_ids())
+    await _send_to_browsers(
+        {"type": "status", "data": {"status": {"exec_info": {"queue_remaining": queue_remaining}}}},
+        client_id,
+    )
+
+
+WAITING_TEXT = "Waiting for a machine — the remote GPU is starting up"
+
+
+async def announce_waiting(client_id, job_id):
+    """Mark a placeholder job as waiting for its machine. The frontend reads a
+    "notification" message containing "Waiting for a machine" for a job id as
+    that job being initialized (the state it shows on ComfyUI Cloud), and
+    clears the mark by itself once the job is no longer in its job list."""
+    await _send_to_browsers({"type": "notification", "data": {"value": WAITING_TEXT, "id": job_id}}, client_id)
 
 
 def _keep_pending_count(client_id, parsed, msg):

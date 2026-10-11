@@ -16,7 +16,9 @@ replayed from a cached response, so:
 
 Live jobs (pending / in progress) only exist on the remote, so they're never
 saved: those lists always come straight from the remote when it's active,
-and fall through to ComfyUI's own (local) answer when it isn't.
+and fall through to ComfyUI's own (local) answer when it isn't. The one
+addition is placeholder jobs (placeholders.py): a prompt still waiting for the
+remote GPU to wake up is added to those lists, so the UI's Job Queue shows it.
 
 refresh_known() is called by the shadow relay (relay.py) right after a job
 finishes — while its connection still proves the remote is awake — so the
@@ -36,6 +38,7 @@ from aiohttp import web
 from . import config as cfgmod
 from . import forwarder
 from . import jobs_db
+from . import placeholders
 
 logger = logging.getLogger("ComfyUIProxy")
 
@@ -235,7 +238,54 @@ async def handle_request(request: web.Request, remote_known_active: bool):
     return await _handle_detail(request, path, remote_known_active)
 
 
+def _with_placeholders(resp, q: _ListQuery, fakes: list):
+    """Add the waiting-for-the-remote placeholder jobs (placeholders.py) to a
+    job-list response — or build one when there is none (the remote is asleep,
+    so the local ComfyUI would answer with an empty queue)."""
+    if q.offset > 0:
+        return resp  # the placeholders belong on the first page
+    cache_header = None
+    if resp is None:
+        data = {"jobs": [], "pagination": {"offset": 0, "limit": q.limit, "total": 0, "has_more": False}}
+    else:
+        try:
+            data = json.loads(resp.body)
+        except Exception:
+            return resp
+        if not isinstance(data, dict) or not isinstance(data.get("jobs"), list):
+            return resp  # an error answer or something unexpected: leave it alone
+        cache_header = resp.headers.get("X-ComfyUI-Proxy-Cache")
+    # Lists are ordered by creation time, and a placeholder is the newest job there is.
+    jobs = (fakes + data["jobs"]) if q.sort_order == "desc" else (data["jobs"] + list(reversed(fakes)))
+    pagination = data.get("pagination") if isinstance(data.get("pagination"), dict) else {}
+    try:
+        total = int(pagination.get("total") or len(data["jobs"])) + len(fakes)
+    except (TypeError, ValueError):
+        total = len(jobs)
+    if q.limit is not None:
+        jobs = jobs[:q.limit]
+    merged = {
+        **data,
+        "jobs": jobs,
+        "pagination": {**pagination, "offset": 0, "limit": q.limit, "total": total, "has_more": len(jobs) < total},
+    }
+    out = web.json_response(merged)
+    if cache_header:
+        out.headers["X-ComfyUI-Proxy-Cache"] = cache_header
+    return out
+
+
 async def _handle_list(request: web.Request, remote_known_active: bool):
+    resp = await _list_core(request, remote_known_active)
+    q = _parse_list_query(request.rel_url.query)
+    if q is not None and "pending" in q.statuses:
+        fakes = placeholders.jobs(q.workflow_id)
+        if fakes:
+            return _with_placeholders(resp, q, fakes)
+    return resp
+
+
+async def _list_core(request: web.Request, remote_known_active: bool):
     path, qs = request.rel_url.path, request.rel_url.query_string
     q = _parse_list_query(request.rel_url.query)
     # Finished jobs can be answered from the saved history; anything that

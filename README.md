@@ -51,7 +51,16 @@ Tap the pill, then the label, to open the panel.
 - **Timeout** — how long to wait for the remote to respond before giving
   up, in seconds. Serverless GPUs can take a while to cold-start when
   capacity is scarce, so this defaults fairly high (300s). Raise it if you
-  see timeout errors right after queuing a prompt.
+  see timeout errors right after queuing a prompt. While the proxy is on,
+  the **Run** button (and file uploads) wait this long too — ComfyUI itself
+  normally gives up after 60 seconds, which a cold start can easily outlast.
+- **Unresponsive-GPU polling cooldown** — if the remote stops responding
+  entirely, pauses automatic background checks for this many seconds before
+  trying again, so a broken connection doesn't keep your serverless
+  instance looking "busy" forever. If it still doesn't answer the next
+  time, the proxy stops checking until you queue a new prompt or use
+  **Clear Stuck State**. If your provider takes longer than the default
+  (30s) to actually shut down an idle instance, raise this.
 - **Post-completion delay** — after a job finishes, keeps the live progress
   connection open a few extra seconds so the progress bar and the final log
   lines (like "Prompt executed in …") finish arriving before disconnecting.
@@ -61,13 +70,6 @@ Tap the pill, then the label, to open the panel.
   still lists your older jobs after ComfyUI or the remote restarts, without
   waking the remote. Deleting or clearing jobs in the panel removes them
   from it too.
-- **Unresponsive-GPU polling cooldown** — if the remote stops responding
-  entirely, pauses automatic background checks for this many seconds before
-  trying again, so a broken connection doesn't keep your serverless
-  instance looking "busy" forever. If it still doesn't answer the next
-  time, the proxy stops checking until you queue a new prompt or use
-  **Clear Stuck State**. If your provider takes longer than the default
-  (30s) to actually shut down an idle instance, raise this.
 - **Auto-download viewed input/output** *(off by default)* — saves the
   images and videos you view in the Media Assets panel to your local
   `output` / `input` folder. Once a file is saved, it's shown from your own
@@ -97,9 +99,14 @@ Tap the pill, then the label, to open the panel.
 - The remote is only woken up when you queue a prompt, check the queue, or
   (if configured) when something actually needs to upload/view a file and
   no separate CPU endpoint is available.
-- If you press **Run** while the GPU is still starting up, your job shows
-  up in the queue straight away, so you know the click registered. The real
-  progress takes over once the GPU is ready.
+- If you press **Run** while the GPU is still starting up, each click shows
+  up in the **Job Queue** straight away, marked as waiting for a machine, so
+  you know it registered (and how many you've queued). You can cancel these
+  entries, or use **Clear queue**, before the GPU is ready — that never
+  wakes it. They're replaced by the real jobs once the GPU is up, and
+  removed again if starting it fails; as a safety net they also vanish by
+  themselves after your **Timeout** plus 60 seconds (change
+  `QUEUE_PLACEHOLDER_MARGIN` in `proxy/config.py` to adjust that margin).
 - Just opening panels like job history or logs never wakes the GPU on its
   own — if nothing's running, you'll see what's saved on your computer (like
   your job history) instead of the proxy reaching out and spinning something

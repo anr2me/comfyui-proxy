@@ -18,10 +18,45 @@ function savePos(pos) {
     }
 }
 
+// --- Long waits for a cold-starting GPU --------------------------------------
+// ComfyUI's frontend aborts any api.fetchApi() call that hasn't received response
+// headers within 60 s ("TimeoutError: Fetch timeout", shown as a "Prompt execution
+// failed" dialog). A serverless GPU can take longer than that to wake up, and
+// submitting a prompt (or uploading an input file) waits for it. While the proxy
+// is on, those two calls get the proxy's own Timeout setting (plus a margin)
+// instead, so what the user ends up seeing is the proxy's real answer — or its
+// real timeout error — rather than the browser giving up first.
+const LONG_WAIT_MARGIN_MS = 30000;
+const LONG_WAIT_ROUTES = [/^(?:\/api)?\/prompt$/, /^(?:\/api)?\/upload\//];
+let longWaitMs = null; // null = proxy off: leave the frontend's own limit alone
+
+function wrapFetchApiForLongWaits(api, getWaitMs) {
+    const original = api.fetchApi.bind(api);
+    api.fetchApi = (route, options) => {
+        const waitMs = getWaitMs();
+        if (waitMs && typeof route === "string" && !(options && "timeoutMs" in options)) {
+            const method = String((options && options.method) || "GET").toUpperCase();
+            if (method === "POST" && LONG_WAIT_ROUTES.some((re) => re.test(route.split("?")[0]))) {
+                options = { ...options, timeoutMs: waitMs };
+            }
+        }
+        return original(route, options);
+    };
+}
+// --- end of long waits --------------------------------------------------------
+
 app.registerExtension({
     name: "ComfyUIProxy.Panel",
     async setup() {
         const pos = loadPos();
+
+        // Let the frontend wait as long as the proxy does for the calls that wake the GPU.
+        try {
+            const { api } = await import("/scripts/api.js");
+            wrapFetchApiForLongWaits(api, () => longWaitMs);
+        } catch (e) {
+            console.warn("[ComfyUI Proxy] Could not extend the frontend's request timeout", e);
+        }
 
         const root = document.createElement("div");
         root.id = "comfyui-proxy-root";
@@ -144,11 +179,10 @@ app.registerExtension({
         const cpuUrlInput = field("Remote CPU URL (optional)", "text", "https://your-cpu-endpoint.example.com");
         const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
         const timeoutInput = field("Timeout (seconds)", "number", "300");
-        const delayInput = field("Post-completion delay (seconds)", "number", "5");
-        const jobsHistoryInput = field("Saved job history size (jobs)", "number", "500");
-        jobsHistoryInput.title =
-            "How many finished jobs to remember on this computer (in jobs_history.db), so the Media " +
-            "Assets panel still lists them after ComfyUI or the remote restarts. Oldest are dropped first.";
+        timeoutInput.title =
+            "How long the proxy waits for the remote GPU to answer, including a cold start. While the proxy is " +
+            "on, the Run button (and file uploads) wait this long plus 30 seconds too, instead of ComfyUI's own " +
+            "60-second limit.";
         const circuitCooldownInput = field(
             "Unresponsive-GPU polling cooldown (seconds)", "number", "30"
         );
@@ -157,6 +191,11 @@ app.registerExtension({
             "before trying again, instead of repeatedly re-attempting and keeping it looking \"active\" " +
             "to your serverless provider's own idle-timeout. Raise this if your provider's idle-timeout " +
             "is longer than the default.";
+        const delayInput = field("Post-completion delay (seconds)", "number", "5");
+        const jobsHistoryInput = field("Saved job history size (jobs)", "number", "500");
+        jobsHistoryInput.title =
+            "How many finished jobs to remember on this computer (in jobs_history.db), so the Media " +
+            "Assets panel still lists them after ComfyUI or the remote restarts. Oldest are dropped first.";
 
         const autoDlInput = checkboxField(
             "Auto-download viewed input/output",
@@ -270,6 +309,7 @@ app.registerExtension({
         function refreshUI(cfg) {
             toggle.checked = !!cfg.enabled;
             dot.style.background = cfg.enabled ? "#4caf50" : "#888";
+            longWaitMs = cfg.enabled ? (Number(cfg.timeout) || 300) * 1000 + LONG_WAIT_MARGIN_MS : null;
             urlInput.value = cfg.remote_url || "";
             cpuUrlInput.value = cfg.remote_cpu_url || "";
             timeoutInput.value = cfg.timeout || 300;
