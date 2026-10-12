@@ -317,7 +317,11 @@ async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -
 
     headers = copy_request_headers(request, use_cpu=use_cpu)
     timeout = get_timeout()
-    body = await request.read() if request.can_read_body else None
+    # body_exists, not can_read_body: the latter turns False as soon as anything
+    # upstream (e.g. the middleware peeking at a history clear/delete or a queue
+    # cancel) has already read the body, which made this forward an EMPTY body
+    # and the remote answer 500. read() hands back the cached bytes in that case.
+    body = await request.read() if request.body_exists else None
 
     req_desc = f"{request.method} {request.rel_url.path_qs}"  # for error logs
     session = get_session()
