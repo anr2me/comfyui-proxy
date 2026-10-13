@@ -43,7 +43,8 @@ Tap the pill, then the label, to open the panel.
 - **Remote CPU URL** *(optional)* — a second, separate endpoint that shares
   the same storage as your GPU one but doesn't need a GPU itself. If you
   have one, uploading input images/videos and viewing/downloading output results can use this
-  cheaper endpoint instead of waking the GPU just to serve a file. This
+  cheaper endpoint instead of waking the GPU just to serve a file, and the
+  model list is fetched from it too. This
   only helps if it's a genuinely different, separately-running endpoint —
   pointing it at the same URL as your GPU one does nothing useful.
 - **Remote CPU Auth Key** *(optional)* — bearer token for the CPU endpoint,
@@ -117,7 +118,10 @@ Tap the pill, then the label, to open the panel.
   finish) or you've turned on **Keep GPU warm**.
 - Model/checkpoint dropdowns are refreshed from the remote once (and
   whenever you change the URL), so you don't see models that only exist on
-  your remote machine as available locally, or vice versa. You may need to refresh the ComfyUI browser tab for the models list changes to reflects on dropdowns.
+  your remote machine as available locally, or vice versa. This never wakes
+  the GPU just to read a list of files: with a **Remote CPU URL** it asks
+  that cheaper endpoint, otherwise it waits until the GPU is up for a job
+  anyway. You may need to refresh the ComfyUI browser tab for the models list changes to reflects on dropdowns.
 - If your computer has no GPU of its own, the Crystools resource monitor
   lists a placeholder one (an NVIDIA L4 by default) so its GPU meters still
   appear; while a job runs it shows the remote GPU's real readings. To

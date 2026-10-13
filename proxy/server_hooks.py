@@ -44,8 +44,10 @@ Routing rules:
     stub 200 instead of Crystools' "400 Bad Request" for a missing GPU.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
-  - Waking the remote is only triggered by /prompt, /queue, an already-known
-    incomplete job, or the first-time model list pull.
+  - Waking the remote is only triggered by /prompt, /queue, or an
+    already-known incomplete job. The first-time model list pull never wakes
+    the GPU: it asks the CPU endpoint when one is configured, and otherwise
+    waits until the GPU is up for a job anyway (see models_cache.py).
 """
 
 import asyncio
@@ -376,6 +378,11 @@ async def _submit_prompt(request: web.Request, path: str) -> web.Response:
         relay.pending_done(client_id)
         if ph is not None:
             placeholders.remove(ph.id)
+
+    if 200 <= resp.status < 300 and models_cache.needs_refresh():
+        # The GPU is up now (its job is queued), so this is the free moment to
+        # fetch the remote model list we deliberately didn't wake it for earlier.
+        asyncio.ensure_future(models_cache.refresh_models_cache())
 
     if ph is not None or not (200 <= resp.status < 300) or not relay.has_relay_for(client_id):
         # The placeholder is gone (replaced by the real job on success), or
