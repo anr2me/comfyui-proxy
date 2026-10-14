@@ -60,16 +60,30 @@ logger = logging.getLogger("ComfyUIProxy")
 _relay_tasks = {}   # client_id -> asyncio.Task
 _ready_events = {}  # client_id -> asyncio.Event, set once shadow ws is up (or failed)
 _pending_prompts = {}  # client_id -> /prompt submissions still waiting on the remote
+_closing_tasks = set()  # relay tasks whose socket is already closed and that are only running final cleanup
 
 _COMPLETION_MSG_TYPES = {"execution_success", "execution_error", "execution_interrupted"}
 
 MAX_DOWNLOAD_KEEP_OPEN = 1800.0  # never hold the connection open longer than this just for file downloads
+
+WS_CLOSE_TIMEOUT = 10.0  # how long closing the shadow websocket may wait for the remote's close frame
 
 
 def _ws_target_url(base: str, path: str, query: str) -> str:
     parts = urlsplit(base)
     scheme = "wss" if parts.scheme == "https" else "ws"
     return urlunsplit((scheme, parts.netloc, path, query, ""))
+
+
+def _ws_timeout():
+    """Timeout object for ws_connect(). Only the close handshake is bounded
+    here: ws_connect()'s `timeout` is NOT a connect/total timeout, and the old
+    value (the whole request timeout, 300s by default) let closing a socket
+    to an already-gone remote block for that long before cleanup could run.
+    aiohttp >= 3.11 takes a ClientWSTimeout; older versions take a float that
+    means the same thing (ws_close)."""
+    cls = getattr(aiohttp, "ClientWSTimeout", None)
+    return cls(ws_close=WS_CLOSE_TIMEOUT) if cls is not None else WS_CLOSE_TIMEOUT
 
 
 def _auth_headers() -> dict:
@@ -245,7 +259,10 @@ async def ensure_relay_ready(client_id: str, wait_timeout: float):
         return
 
     task = _relay_tasks.get(client_id)
-    if task is None or task.done():
+    # A task that is already in its final cleanup (socket closed, but still
+    # awaiting a refresh / log unsubscribe) is not "ready": reusing it would
+    # leave the new job without a live progress stream.
+    if task is None or task.done() or task in _closing_tasks:
         _ready_events[client_id] = asyncio.Event()
         task = asyncio.ensure_future(_run_relay(client_id))
         _relay_tasks[client_id] = task
@@ -265,6 +282,29 @@ def _signal_ready(client_id: str):
     ev = _ready_events.get(client_id)
     if ev is not None and not ev.is_set():
         ev.set()
+
+
+def _owns_slot(client_id: str, task) -> bool:
+    """True if `task` is still the relay registered for client_id, or if
+    nobody is (e.g. cancel_all_relays() already cleared the registry). False
+    once a newer relay has taken the slot: a finishing old task must then
+    leave that entry, its ready event, its log subscription and its job
+    tracking alone — they belong to the newer relay's live connection."""
+    current = _relay_tasks.get(client_id)
+    return current is None or current is task
+
+
+def _status_queue_remaining(parsed, default: int) -> int:
+    """queue_remaining from a remote "status" message, or `default` if
+    `parsed` isn't one (or doesn't carry a usable number)."""
+    if not isinstance(parsed, dict) or parsed.get("type") != "status":
+        return default
+    try:
+        exec_info = ((parsed.get("data") or {}).get("status") or {}).get("exec_info") or {}
+        value = exec_info.get("queue_remaining")
+        return int(value) if value is not None else default
+    except (TypeError, ValueError, AttributeError):
+        return default
 
 
 async def _relay_for(ws_remote, client_id: str, seconds: float) -> bool:
@@ -352,9 +392,15 @@ async def _run_relay(client_id: str):
     target = _ws_target_url(base, "/ws", f"clientId={client_id}")
     session = forwarder.get_tracking_session()
 
-    logger.info(f"[ComfyUI Proxy] Connecting remote GPU progress stream for client {client_id}...")
+    me = asyncio.current_task()
+    rid = f"{id(me) & 0xFFFF:04x}"  # short per-task id, to tell overlapping relays apart in the logs
+    last_queue_remaining = 0   # most recent queue_remaining the remote reported to us
+    finished_clean = False     # saw "no jobs left" for this client (and nothing was queued since)
+    cancelled = False          # ended by cancel_all_relays() (manual reset), not by the remote
+
+    logger.info(f"[ComfyUI Proxy] Connecting remote GPU progress stream for client {client_id}... [relay {rid}]")
     try:
-        async with session.ws_connect(target, headers=headers, timeout=timeout.total, heartbeat=30) as ws_remote:
+        async with session.ws_connect(target, headers=headers, timeout=_ws_timeout(), heartbeat=30) as ws_remote:
             got_sid = False
 
             async for msg in ws_remote:
@@ -363,6 +409,8 @@ async def _run_relay(client_id: str):
                         parsed = json.loads(msg.data)
                     except Exception:
                         parsed = None
+
+                    last_queue_remaining = _status_queue_remaining(parsed, last_queue_remaining)
 
                     if not got_sid:
                         # This very first message arrives right after connecting,
@@ -414,6 +462,7 @@ async def _run_relay(client_id: str):
                         else:
                             state.clear_all()  # queue_remaining==0 is a global signal, not scoped to one prompt_id
                         if not state.has_incomplete_job_for_client(client_id):
+                            finished_clean = True
                             # No separate refresh here: while a job is known
                             # incomplete, _remote_known_active() is already
                             # True, so the frontend's own ordinary /api/jobs
@@ -440,6 +489,7 @@ async def _run_relay(client_id: str):
                             # for this client — close the connection instead of
                             # abandoning that job's progress tracking with it.
                             if state.has_incomplete_job_for_client(client_id):
+                                finished_clean = False
                                 logger.info(
                                     f"[ComfyUI Proxy] New job queued for client {client_id} during the grace "
                                     "period; keeping the progress stream open instead of closing it."
@@ -451,6 +501,7 @@ async def _run_relay(client_id: str):
                                 # a prompt could have been resubmitted during
                                 # it too, so check once more before closing.
                                 if state.has_incomplete_job_for_client(client_id):
+                                    finished_clean = False
                                     logger.info(
                                         f"[ComfyUI Proxy] New job queued for client {client_id} during the "
                                         "keep-alive extension; keeping the progress stream open instead of closing it."
@@ -463,6 +514,9 @@ async def _run_relay(client_id: str):
                 elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
                     break
 
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
     except asyncio.TimeoutError:
         logger.warning(f"[ComfyUI Proxy] Timed out connecting remote progress stream for client {client_id}")
     except aiohttp.ClientError as e:
@@ -470,27 +524,58 @@ async def _run_relay(client_id: str):
     except Exception as e:
         logger.warning(f"[ComfyUI Proxy] Unexpected error in remote progress stream for client {client_id}: {e}")
     finally:
-        _signal_ready(client_id)  # never leave a waiting /prompt hanging on failure
-        # Guaranteed final refresh attempt, regardless of how the loop above
-        # exited (clean "finished" detection, the remote closing the socket
-        # on its own before ever sending a tidy completion message, a
-        # timeout, ...). The "finished" branch already does this on the
-        # clean path; this covers every other exit path too, so a dropped
-        # connection doesn't silently skip caching the last job's result.
-        # Best-effort: the remote may genuinely be gone by now, in which
-        # case this just fails quietly like any other refresh attempt would.
-        await jobs_cache.refresh_known(reason=f"client {client_id} relay closing")
-        await _subscribe_logs(base, headers, timeout, client_id, False)
-        _relay_tasks.pop(client_id, None)
-        _ready_events.pop(client_id, None)
-        # Whatever jobs were tracked against this client stop being tracked
-        # the moment we can no longer observe them, regardless of why the
-        # relay ended (clean completion, connect timeout, ws error, ...).
-        # Without this, a relay that fails before ever seeing a completion
-        # message leaves its prompt_id "incomplete" forever, with nothing
-        # left alive to ever clear it — permanently forcing every future
-        # request into "remote known active" and silently re-waking the
-        # remote for routes that should only proxy while something's
-        # actually running.
-        state.clear_client(client_id)
-        logger.info(f"[ComfyUI Proxy] Remote GPU progress stream closed for client {client_id}.")
+        # From here on this task's own socket is closed; it only runs cleanup.
+        # Mark it so ensure_relay_ready() won't reuse it as a live relay while
+        # the awaits below are in flight, and snapshot the job state now,
+        # before anything else can change it.
+        _closing_tasks.add(me)
+        tracked_jobs = state.incomplete_count_for_client(client_id)
+        try:
+            # The stream ended while jobs were still queued/running: we never
+            # saw the "No jobs left on remote GPU" point, so the remote most
+            # likely went away mid-job (interrupted / preempted / scaled to
+            # zero). A manual reset (cancelled) is not an interruption.
+            if not cancelled and (tracked_jobs > 0 or (last_queue_remaining > 0 and not finished_clean)):
+                logger.warning(
+                    f"[ComfyUI Proxy] Remote GPU got interrupted while having "
+                    f"{max(tracked_jobs, last_queue_remaining)} queued job(s) for client {client_id} "
+                    f"(last reported queue_remaining={last_queue_remaining}, tracked jobs={tracked_jobs}); "
+                    "the remote may have been preempted or scaled down mid-job."
+                )
+            if _owns_slot(client_id, me):
+                _signal_ready(client_id)  # never leave a waiting /prompt hanging on failure
+            # Guaranteed final refresh attempt, regardless of how the loop above
+            # exited (clean "finished" detection, the remote closing the socket
+            # on its own before ever sending a tidy completion message, a
+            # timeout, ...). The "finished" branch already does this on the
+            # clean path; this covers every other exit path too, so a dropped
+            # connection doesn't silently skip caching the last job's result.
+            # Best-effort: the remote may genuinely be gone by now, in which
+            # case this just fails quietly like any other refresh attempt would.
+            await jobs_cache.refresh_known(reason=f"client {client_id} relay closing")
+            # A newer relay for the same client may have subscribed to logs
+            # already; don't switch that subscription off underneath it.
+            if _owns_slot(client_id, me):
+                await _subscribe_logs(base, headers, timeout, client_id, False)
+        except Exception as e:
+            logger.warning(f"[ComfyUI Proxy] Error while closing remote progress stream for client {client_id}: {e}")
+        finally:
+            # No awaits from here on, so ownership can't change mid-cleanup.
+            # Only release the slot (and the job tracking) if a newer relay
+            # for this client hasn't taken it: otherwise this would drop that
+            # relay's registration while its websocket stays open, orphaning it.
+            if _owns_slot(client_id, me):
+                _relay_tasks.pop(client_id, None)
+                _ready_events.pop(client_id, None)
+                # Whatever jobs were tracked against this client stop being tracked
+                # the moment we can no longer observe them, regardless of why the
+                # relay ended (clean completion, connect timeout, ws error, ...).
+                # Without this, a relay that fails before ever seeing a completion
+                # message leaves its prompt_id "incomplete" forever, with nothing
+                # left alive to ever clear it — permanently forcing every future
+                # request into "remote known active" and silently re-waking the
+                # remote for routes that should only proxy while something's
+                # actually running.
+                state.clear_client(client_id)
+            _closing_tasks.discard(me)
+            logger.info(f"[ComfyUI Proxy] Remote GPU progress stream closed for client {client_id}. [relay {rid}]")
