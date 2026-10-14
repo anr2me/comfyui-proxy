@@ -30,6 +30,8 @@ logger = logging.getLogger("ComfyUIProxy")
 
 _refresh_lock = asyncio.Lock()  # one fetch at a time (enable, URL change and a job starting can overlap)
 _deferred_logged = False
+_refreshing = 0  # refresh_models_cache() calls in progress, including ones still waiting for the lock
+_background_tasks = set()  # keeps schedule_refresh() tasks from being garbage-collected mid-run
 
 
 def _gpu_active() -> bool:
@@ -62,7 +64,60 @@ def needs_refresh() -> bool:
     return not _cached_for(cfgmod.load_config(), gpu_base)
 
 
+def is_refreshing() -> bool:
+    """True while a model-list fetch is running or queued. The panel shows
+    "Updating model list..." for as long as this is the case."""
+    return _refreshing > 0
+
+
+def schedule_refresh(force: bool = False, manual: bool = False):
+    """Run refresh_models_cache() in the background — unless it would only
+    hand back the list that is already cached, in which case nothing starts.
+    The refresh counts as in progress from this very call, before the task
+    has had a chance to run, so a status read right afterwards (the config
+    POST's own response) already says "updating" rather than "not cached"."""
+    global _refreshing
+    gpu_base = forwarder.target_base()
+    if not gpu_base:
+        return None
+    if not force and _cached_for(cfgmod.load_config(), gpu_base):
+        return None
+
+    async def _run():
+        try:
+            await refresh_models_cache(force=force, manual=manual)
+        except Exception as e:
+            logger.warning(f"[ComfyUI Proxy] Remote model list refresh failed: {e}")
+
+    _refreshing += 1
+    try:
+        task = asyncio.create_task(_run())
+    except BaseException:
+        _refreshing -= 1
+        raise
+    _background_tasks.add(task)
+
+    def _done(t):
+        global _refreshing
+        _refreshing -= 1
+        _background_tasks.discard(t)
+
+    task.add_done_callback(_done)
+    return task
+
+
 async def refresh_models_cache(force: bool = False, manual: bool = False):
+    """Fetch the remote's model list and cache it (see _refresh_models_cache);
+    counted by is_refreshing() while it runs or waits for its turn."""
+    global _refreshing
+    _refreshing += 1
+    try:
+        return await _refresh_models_cache(force=force, manual=manual)
+    finally:
+        _refreshing -= 1
+
+
+async def _refresh_models_cache(force: bool = False, manual: bool = False):
     """Fetch the remote's model list and cache it. `force` refetches even if
     one is cached; `manual` says the user asked for it (the "Refresh Models"
     button), which makes it worth waking a GPU when there is no cheaper way

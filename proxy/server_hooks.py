@@ -660,9 +660,10 @@ async def proxy_middleware(request: web.Request, handler):
 
 def _public_config() -> dict:
     cfg = dict(cfgmod.load_config())
-    models_cache = cfg.get("models_cache") or {}
-    cfg["has_models_cache"] = bool(models_cache)
-    cfg["models_cache_count"] = len(models_cache)
+    cached_models = cfg.get("models_cache") or {}
+    cfg["has_models_cache"] = bool(cached_models)
+    cfg["models_cache_count"] = len(cached_models)
+    cfg["models_refreshing"] = models_cache.is_refreshing()  # a model list fetch is running or queued
     cfg["auth_key_set"] = bool(cfg.get("auth_key"))
     cfg["remote_cpu_auth_key_set"] = bool(cfg.get("remote_cpu_auth_key"))
     cfg.pop("models_cache", None)
@@ -750,7 +751,9 @@ def setup():
             viewcache.cancel_all()  # stop background file downloads (turned off, or endpoint switched)
 
         if cfg.get("enabled") and cfg.get("remote_url") and (url_changed or newly_enabled or not cfg.get("models_cache")):
-            asyncio.create_task(models_cache.refresh_models_cache(force=url_changed))
+            # Counted as in progress right away, so the response below already
+            # reports models_refreshing=True instead of a misleading "not cached".
+            models_cache.schedule_refresh(force=url_changed)
 
         if url_changed:
             state.clear_all()  # a switched endpoint invalidates any tracked remote job

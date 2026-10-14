@@ -322,16 +322,56 @@ app.registerExtension({
             syncKeepaliveIdleVisibility();
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             cpuAuthInput.placeholder = cfg.remote_cpu_auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
+            renderModelsStatus(cfg);
+        }
+
+        // Only the status line, so polling never overwrites what is being typed in the fields.
+        function renderModelsStatus(cfg) {
             statusLine.textContent = cfg.remote_url
-                ? cfg.has_models_cache
-                    ? `Remote model list cached (${cfg.models_cache_count} field${cfg.models_cache_count === 1 ? "" : "s"}).`
-                    : "Remote model list not yet cached."
+                ? cfg.models_refreshing
+                    ? "Updating model list..."
+                    : cfg.has_models_cache
+                        ? `Remote model list cached (${cfg.models_cache_count} field${cfg.models_cache_count === 1 ? "" : "s"}).`
+                        : "Remote model list not yet cached."
                 : "No remote URL configured yet.";
+        }
+
+        // Saving or enabling starts the model list fetch in the background, so the
+        // status stays on "Updating model list..." until the proxy says it is done
+        // (a cold start can take a while), then shows the cached count — or goes
+        // back to "not yet cached" if the list is still empty — and refreshes the
+        // dropdowns like the Refresh Models button does.
+        let modelsPollTimer = null;
+        function watchModelsRefresh() {
+            if (modelsPollTimer) return; // already watching
+            const tick = async () => {
+                let cfg;
+                try {
+                    cfg = await getConfig();
+                } catch (e) {
+                    modelsPollTimer = null;
+                    return;
+                }
+                renderModelsStatus(cfg);
+                if (cfg.models_refreshing) {
+                    modelsPollTimer = setTimeout(tick, 1500);
+                    return;
+                }
+                modelsPollTimer = null;
+                if (cfg.has_models_cache) {
+                    const ok = await refreshFrontendComboLists();
+                    if (!ok) {
+                        statusLine.textContent += " Reload the page to see updated model dropdowns.";
+                    }
+                }
+            };
+            modelsPollTimer = setTimeout(tick, 1000);
         }
 
         try {
             const cfg = await getConfig();
             refreshUI(cfg);
+            if (cfg.models_refreshing) watchModelsRefresh();
         } catch (e) {
             console.warn("[ComfyUI Proxy] Failed to load config", e);
         }
@@ -341,6 +381,7 @@ app.registerExtension({
             try {
                 const cfg = await postConfig({ enabled: desired });
                 refreshUI(cfg);
+                if (cfg.models_refreshing) watchModelsRefresh();
             } catch (e) {
                 console.error("[ComfyUI Proxy] Failed to update toggle", e);
                 toggle.checked = !desired;
@@ -377,7 +418,9 @@ app.registerExtension({
                 refreshUI(cfg);
                 authInput.value = "";
                 cpuAuthInput.value = "";
-                if (cfg.has_models_cache) {
+                if (cfg.models_refreshing) {
+                    watchModelsRefresh(); // dropdowns are refreshed once the new list is in
+                } else if (cfg.has_models_cache) {
                     const ok = await refreshFrontendComboLists();
                     if (!ok) {
                         statusLine.textContent += " Reload the page to see updated model dropdowns.";
@@ -391,6 +434,7 @@ app.registerExtension({
 
         refreshBtn.addEventListener("click", async () => {
             refreshBtn.textContent = "Refreshing...";
+            statusLine.textContent = "Updating model list...";
             try {
                 await fetch("/comfyui_proxy/refresh_models", { method: "POST" });
                 const cfg = await getConfig();
