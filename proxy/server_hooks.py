@@ -44,10 +44,11 @@ Routing rules:
     stub 200 instead of Crystools' "400 Bad Request" for a missing GPU.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
-  - Waking the remote is only triggered by /prompt, /queue, or an
-    already-known incomplete job. The first-time model list pull never wakes
-    the GPU: it asks the CPU endpoint when one is configured, and otherwise
-    waits until the GPU is up for a job anyway (see models_cache.py).
+  - Waking the remote is only triggered by /prompt, /queue, an already-known
+    incomplete job, or fetching the model list (see models_cache.py): that
+    asks the GPU only when it's already up, otherwise the CPU endpoint when
+    one is configured, and wakes the GPU only when there is no CPU endpoint
+    and no list yet — or when the user clicks Refresh Models.
 """
 
 import asyncio
@@ -771,7 +772,7 @@ def setup():
     async def _refresh_models(request):
         if not cfgmod.get("remote_url"):
             return web.json_response({"error": "remote URL not configured"}, status=400)
-        cache = await models_cache.refresh_models_cache(force=True)
+        cache = await models_cache.refresh_models_cache(force=True, manual=True)  # the user asked: worth waking something
         return web.json_response({"count": len(cache) if cache else 0})
 
     @routes.post("/comfyui_proxy/reset_state")

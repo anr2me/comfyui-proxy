@@ -71,7 +71,7 @@ Tap the pill, then the label, to open the panel.
   still lists your older jobs after ComfyUI or the remote restarts, without
   waking the remote. Deleting or clearing jobs in the panel removes them
   from it too.
-- **Auto-download viewed input/output** *(off by default)* — saves the
+- **Auto-download viewed input/output** *(on by default)* — saves the
   images and videos you view in the Media Assets panel to your local
   `output` / `input` folder. Once a file is saved, it's shown from your own
   computer, so switching browser tabs or reopening the panel no longer
@@ -118,10 +118,13 @@ Tap the pill, then the label, to open the panel.
   finish) or you've turned on **Keep GPU warm**.
 - Model/checkpoint dropdowns are refreshed from the remote once (and
   whenever you change the URL), so you don't see models that only exist on
-  your remote machine as available locally, or vice versa. This never wakes
-  the GPU just to read a list of files: with a **Remote CPU URL** it asks
-  that cheaper endpoint, otherwise it waits until the GPU is up for a job
-  anyway. You may need to refresh the ComfyUI browser tab for the models list changes to reflects on dropdowns.
+  your remote machine as available locally, or vice versa. With a **Remote
+  CPU URL** it asks that cheaper endpoint, so the GPU isn't woken just to
+  read a list of files. Without one it uses the GPU when it's already up,
+  and wakes it only when you have no list yet (you can't pick models for a
+  workflow without one). If you've added models on the server, use **Refresh
+  Models** in the panel: that always fetches the list right away, waking the
+  GPU (or the CPU endpoint, if you have one) when needed. You may need to refresh the ComfyUI browser tab for the models list changes to reflects on dropdowns.
 - If your computer has no GPU of its own, the Crystools resource monitor
   lists a placeholder one (an NVIDIA L4 by default) so its GPU meters still
   appear; while a job runs it shows the remote GPU's real readings. To
