@@ -144,6 +144,6 @@ Open the panel and use:
 
 The ComfyUI console log explains what the proxy is doing as it happens —
 when it's waking the remote, which endpoint a request went to, and why, so
-if something looks off that's the first place to check.  
-If you saw HTTP status 5XX in the logs, it means something wrong happened on server side (ie. Comfy server might be crashed or not ready yet).  
-If the job ended prematurely without getting any output, the server might be interrupted/preempted.
+if something looks off that's the first place to check. For example:  
+- If you saw HTTP status 5XX in the logs, it means something wrong happened on server side (ie. Comfy server might be crashed or not ready yet).  
+- If the job ended prematurely without getting any output, the server might be interrupted/preempted.
