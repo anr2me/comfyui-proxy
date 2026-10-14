@@ -358,11 +358,11 @@ app.registerExtension({
                     return;
                 }
                 modelsPollTimer = null;
-                if (cfg.has_models_cache) {
-                    const ok = await refreshFrontendComboLists();
-                    if (!ok) {
-                        statusLine.textContent += " Reload the page to see updated model dropdowns.";
-                    }
+                // Also when nothing is cached (e.g. a new URL's first fetch failed), so the
+                // dropdowns drop the previous remote's models instead of keeping them.
+                const ok = await refreshFrontendComboLists();
+                if (!ok) {
+                    statusLine.textContent += " Reload the page to see updated model dropdowns.";
                 }
             };
             modelsPollTimer = setTimeout(tick, 1000);

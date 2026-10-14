@@ -116,15 +116,18 @@ Tap the pill, then the label, to open the panel.
   progress bar and final log lines to arrive, then disconnects — unless a
   file you viewed is still being auto-downloaded (it waits for that to
   finish) or you've turned on **Keep GPU warm**.
-- Model/checkpoint dropdowns are refreshed from the remote once (and
-  whenever you change the URL), so you don't see models that only exist on
-  your remote machine as available locally, or vice versa. With a **Remote
-  CPU URL** it asks that cheaper endpoint, so the GPU isn't woken just to
-  read a list of files. Without one it uses the GPU when it's already up,
-  and wakes it only when you have no list yet (you can't pick models for a
-  workflow without one). If you've added models on the server, use **Refresh
-  Models** in the panel: that always fetches the list right away, waking the
-  GPU (or the CPU endpoint, if you have one) when needed. You may need to refresh the ComfyUI browser tab for the models list changes to reflects on dropdowns.
+- Model/checkpoint dropdowns show what your remote machine has, not your
+  local files. The list is fetched when you save a URL or turn the proxy on;
+  the panel says **Updating model list...** meanwhile, then **Remote model
+  list cached (N fields)**. If it says **not yet cached**, the fetch failed
+  (see the console log) and you'll see your local models until it works.
+  Each list belongs to its URL: another server's list is never reused, and a
+  failed refresh keeps the last good list for the same URL. With a **Remote
+  CPU URL** the list is fetched from that cheaper endpoint; without one the
+  GPU is used if it's already up, and woken only when you have no list yet.
+  Added models on the server? Use **Refresh Models** — it fetches right away,
+  waking the GPU (or the CPU endpoint) if needed. If the dropdowns still look
+  stale, reload the ComfyUI browser tab.
 - If your computer has no GPU of its own, the Crystools resource monitor
   lists a placeholder one (an NVIDIA L4 by default) so its GPU meters still
   appear; while a job runs it shows the remote GPU's real readings. To
@@ -146,4 +149,5 @@ The ComfyUI console log explains what the proxy is doing as it happens —
 when it's waking the remote, which endpoint a request went to, and why, so
 if something looks off that's the first place to check. For example:  
 - If you saw HTTP status 5XX in the logs, it means something wrong happened on server side (ie. Comfy server might be crashed or not ready yet).  
+- If the log says **Remote GPU got interrupted while having N queued job(s)**, the remote went away mid-job (preempted or scaled down) and those jobs didn't finish.  
 - If the job ended prematurely without getting any output, the server might be interrupted/preempted.

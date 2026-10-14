@@ -552,9 +552,9 @@ async def proxy_middleware(request: web.Request, handler):
                 f"{'disabled' if not cfgmod.get('enabled') else 'missing a remote_url'}."
             )
             return resp
-        cache = cfgmod.get("models_cache")
+        cache = models_cache.cached_models()  # only a list cached for this exact remote URL
         if not cache:
-            logger.info(f"[ComfyUI Proxy] Skipping {path} model patch: no cached model list yet.")
+            logger.info(f"[ComfyUI Proxy] Skipping {path} model patch: no cached model list for this remote yet.")
             return resp
         return _merge_remote_models(resp, cache, context=path)
 
@@ -660,7 +660,7 @@ async def proxy_middleware(request: web.Request, handler):
 
 def _public_config() -> dict:
     cfg = dict(cfgmod.load_config())
-    cached_models = cfg.get("models_cache") or {}
+    cached_models = models_cache.cached_models(cfg)
     cfg["has_models_cache"] = bool(cached_models)
     cfg["models_cache_count"] = len(cached_models)
     cfg["models_refreshing"] = models_cache.is_refreshing()  # a model list fetch is running or queued
@@ -750,7 +750,7 @@ def setup():
         if not cfg.get("auto_download_viewed") or url_changed:
             viewcache.cancel_all()  # stop background file downloads (turned off, or endpoint switched)
 
-        if cfg.get("enabled") and cfg.get("remote_url") and (url_changed or newly_enabled or not cfg.get("models_cache")):
+        if cfg.get("enabled") and cfg.get("remote_url") and (url_changed or newly_enabled or not models_cache.cached_models(cfg)):
             # Counted as in progress right away, so the response below already
             # reports models_refreshing=True instead of a misleading "not cached".
             models_cache.schedule_refresh(force=url_changed)
