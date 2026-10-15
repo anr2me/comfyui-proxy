@@ -36,6 +36,12 @@ Routing rules:
     GPU), but its combo/dropdown model lists are patched with the cached
     remote model list when available, so users can't pick a model that only
     exists locally and would fail when the job actually runs remotely.
+  - The file lists behind the Media Assets panel — GET /internal/files/input
+    (the Imported tab) and, with --enable-assets, GET /api/assets — come from
+    the remote, and the last list seen is kept (files_cache.py) to show while
+    the remote is asleep. The rest of the asset API (/api/assets/<id>, its
+    content, ...) is forwarded like /view; only /api/assets/seed and
+    /api/assets/prune stay local, since they scan this computer's folders.
   - GET /crystools/monitor/GPU (and its /api alias) that stays local — i.e.
     isn't forwarded because no job is active — has an empty "no GPU" answer
     replaced with a fake GPU (config.GPU_NAME / GPU_COUNT), so Crystools'
@@ -63,6 +69,7 @@ from aiohttp import web
 from server import PromptServer
 
 from . import config as cfgmod
+from . import files_cache
 from . import forwarder
 from . import jobs_cache
 from . import keepalive
@@ -88,6 +95,13 @@ GPU_ONLY_CONDITIONAL_PREFIXES = ("/history",)
 # configured — see _use_cpu_target().
 CPU_ELIGIBLE_EXACT = {"/upload/image", "/upload/mask"}
 CPU_ELIGIBLE_PREFIXES = ("/view", "/viewvideo")
+# The asset API of an --enable-assets remote, as _strip_api_prefix() sees it
+# ("/api/assets/..." -> "/assets/..."). Reads are file-like and treated like
+# /view; changes go to the GPU, and only while it's already up. Kept apart from
+# CPU_ELIGIBLE_PREFIXES, which also counts as "viewing" (keepalive.py). Its scan
+# controls act on this computer's own folders, so they stay local.
+ASSET_PREFIX = "/assets"
+LOCAL_ONLY_ASSET_PREFIXES = ("/assets/seed", "/assets/prune")
 # "/api/crystools" is its own real namespace (not an alias of a plain route).
 # "/api/jobs" GET requests are handled separately below (with a local
 # response cache); this prefix only still matters here for any other method.
@@ -115,8 +129,19 @@ def _remote_known_active() -> bool:
     return state.has_incomplete_job() or relay.has_active_relay()
 
 
+def _is_asset_route(canonical: str) -> bool:
+    if canonical != ASSET_PREFIX and not canonical.startswith(ASSET_PREFIX + "/"):
+        return False
+    return not any(canonical == p or canonical.startswith(p + "/") for p in LOCAL_ONLY_ASSET_PREFIXES)
+
+
+def _is_asset_write(canonical: str, method: str) -> bool:
+    """Anything but reading the asset API."""
+    return _is_asset_route(canonical) and method not in ("GET", "HEAD")
+
+
 def _is_cpu_eligible(canonical: str) -> bool:
-    return canonical in CPU_ELIGIBLE_EXACT or any(
+    return canonical in CPU_ELIGIBLE_EXACT or _is_asset_route(canonical) or any(
         canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES
     )
 
@@ -136,7 +161,7 @@ def _cpu_target_configured() -> bool:
     return cpu_url != gpu_url
 
 
-def _use_cpu_target(canonical: str) -> bool:
+def _use_cpu_target(canonical: str, method: str = "GET") -> bool:
     """True if this request should go to the CPU-only target instead of the
     GPU one: only for file-only routes, only when a genuinely distinct CPU
     URL is configured, and only while a job isn't actually still running.
@@ -151,12 +176,14 @@ def _use_cpu_target(canonical: str) -> bool:
     that's on its way out anyway."""
     if not _is_cpu_eligible(canonical):
         return False
+    if _is_asset_write(canonical, method):
+        return False  # asset changes go to the GPU (see _should_proxy)
     if not _cpu_target_configured():
         return False
     return not state.has_incomplete_job()
 
 
-def _should_proxy(path: str) -> bool:
+def _should_proxy(path: str, method: str = "GET") -> bool:
     canonical = _strip_api_prefix(path)
     if canonical in ALWAYS_PROXY_EXACT:
         return True
@@ -169,6 +196,8 @@ def _should_proxy(path: str) -> bool:
         # genuinely distinct CPU target is configured to actually serve it —
         # _use_cpu_target() (checked again at dispatch time) decides which
         # target that is.
+        if _is_asset_write(canonical, method):
+            return _remote_known_active()  # changing an asset is never worth waking the GPU for
         return _remote_known_active() or _cpu_target_configured()
     if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
         return _remote_known_active()
@@ -591,6 +620,14 @@ async def proxy_middleware(request: web.Request, handler):
             return resp
         return await handler(request)  # nothing cached; let local take it
 
+    # The file lists behind the Media Assets panel (the Imported tab; the asset
+    # lists with --enable-assets): the remote's, when it can be asked without
+    # waking the GPU, otherwise the last list seen (files_cache.py) — never this
+    # computer's own files, which the remote may not have.
+    if _is_enabled() and request.method == "GET" and files_cache.is_list_route(path):
+        cpu = _cpu_target_configured() and not state.has_incomplete_job()
+        return await files_cache.handle_request(request, cpu or _remote_known_active(), cpu)
+
     # POST /history (or /api/history) with {"clear": true} or {"delete": [ids]}
     # is the frontend removing completed/failed jobs from the history — forget
     # them in our saved job history too, regardless of whether this particular
@@ -636,7 +673,7 @@ async def proxy_middleware(request: web.Request, handler):
             if request.method != "GET":
                 view_local_path = None
 
-    if not _is_enabled() or not _should_proxy(path):
+    if not _is_enabled() or not _should_proxy(path, request.method):
         if _is_enabled():
             stub = _stub_fake_gpu_patch(request, canonical)
             if stub is not None:
@@ -662,7 +699,7 @@ async def proxy_middleware(request: web.Request, handler):
     # uploads, free, ...): stream through untouched, preserving encoding,
     # partial content, and status codes — to the CPU target when eligible
     # and the GPU isn't already active, otherwise to the GPU as usual.
-    use_cpu = _use_cpu_target(canonical)
+    use_cpu = _use_cpu_target(canonical, request.method)
     is_view_route = any(canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES)
     if use_cpu:
         logger.info(f"[ComfyUI Proxy] Using remote CPU container for {path} (GPU not active).")

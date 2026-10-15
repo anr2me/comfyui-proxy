@@ -129,6 +129,14 @@ Tap the pill, then the label, to open the panel.
   Added models on the server? Use **Refresh Models** — it fetches right away,
   waking the GPU (or the CPU endpoint) if needed. If the dropdowns still look
   stale, reload the ComfyUI browser tab.
+- The **Imported** tab of the Media Assets panel lists the files on the
+  remote (those you uploaded or imported), not the ones on your computer —
+  also when ComfyUI runs with `--enable-assets` on both sides (the remote
+  needs it too). They're read from your **Remote CPU URL** if you have one,
+  or from the GPU while it's running; opening the panel never wakes the GPU.
+  Otherwise you see the last list the proxy got (kept in
+  `remote_files_cache.json` in this folder, separately for each URL), or an
+  empty one if it never got any.
 - If your computer has no GPU of its own, the Crystools resource monitor
   lists a placeholder one (an NVIDIA L4 by default) so its GPU meters still
   appear; while a job runs it shows the remote GPU's real readings. To

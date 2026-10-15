@@ -48,6 +48,7 @@ import aiohttp
 from server import PromptServer
 
 from . import config as cfgmod
+from . import files_cache
 from . import forwarder
 from . import jobs_cache
 from . import keepalive
@@ -553,6 +554,7 @@ async def _run_relay(client_id: str):
             # Best-effort: the remote may genuinely be gone by now, in which
             # case this just fails quietly like any other refresh attempt would.
             await jobs_cache.refresh_known(reason=f"client {client_id} relay closing")
+            await files_cache.refresh_known(reason=f"client {client_id} relay closing")
             # A newer relay for the same client may have subscribed to logs
             # already; don't switch that subscription off underneath it.
             if _owns_slot(client_id, me):
