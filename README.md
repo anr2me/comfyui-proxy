@@ -137,13 +137,13 @@ Tap the pill, then the label, to open the panel.
   folder, separately for each URL), or an empty one if it never got any.
   With `--enable-assets` on your local ComfyUI the panel uses the asset lists
   instead, with previews and edits too, and the proxy answers all of it from
-  the remote. Safest: when you have a **Remote CPU URL**, turn the assets
+  the remote.  </br>_Safest:_ when you have a **Remote CPU URL**, turn the assets
   system on only for that CPU container and leave it off on the GPU one;
   after your last job finishes, the proxy then asks the CPU container to
   rescan its output folder once, so new results show up (not after every
   job, since that scan walks the whole folder). If both containers run it on
   one shared user folder, ComfyUI's lock on the database may not hold across
-  them (watch for "database is locked").
+  them (watch for "database is locked" message).
 - If your computer has no GPU of its own, the Crystools resource monitor
   lists a placeholder one (an NVIDIA L4 by default) so its GPU meters still
   appear; while a job runs it shows the remote GPU's real readings. To
@@ -166,4 +166,3 @@ when it's waking the remote, which endpoint a request went to, and why, so
 if something looks off that's the first place to check. For example:  
 - If you saw HTTP status 5XX in the logs, it means something wrong happened on server side (ie. Comfy server might be crashed or not ready yet).  
 - If the log says **Remote GPU got interrupted while having N queued job(s)**, the remote went away mid-job (preempted or scaled down) and those jobs didn't finish.  
-- If the job ended prematurely without getting any output, the server might be interrupted/preempted.
