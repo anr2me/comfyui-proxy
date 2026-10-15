@@ -134,6 +134,9 @@ Tap the pill, then the label, to open the panel.
   also when ComfyUI runs with `--enable-assets` on both sides (the remote
   needs it too). They're read from your **Remote CPU URL** if you have one,
   or from the GPU while it's running; opening the panel never wakes the GPU.
+  If your CPU and GPU containers share one user folder, they share one assets
+  database too — which is what the proxy expects, so an asset means the same
+  thing on both (separate databases would make previews and changes fail).
   Otherwise you see the last list the proxy got (kept in
   `remote_files_cache.json` in this folder, separately for each URL), or an
   empty one if it never got any.

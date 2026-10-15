@@ -96,8 +96,10 @@ GPU_ONLY_CONDITIONAL_PREFIXES = ("/history",)
 CPU_ELIGIBLE_EXACT = {"/upload/image", "/upload/mask"}
 CPU_ELIGIBLE_PREFIXES = ("/view", "/viewvideo")
 # The asset API of an --enable-assets remote, as _strip_api_prefix() sees it
-# ("/api/assets/..." -> "/assets/..."). Reads are file-like and treated like
-# /view; changes go to the GPU, and only while it's already up. Kept apart from
+# ("/api/assets/..." -> "/assets/..."). Reads and changes alike are treated like
+# /view: the CPU endpoint when one is configured and no job is running, else the
+# GPU while it's up. This relies on both containers sharing one assets database,
+# so an asset ID means the same thing on either. Kept apart from
 # CPU_ELIGIBLE_PREFIXES, which also counts as "viewing" (keepalive.py). Its scan
 # controls act on this computer's own folders, so they stay local.
 ASSET_PREFIX = "/assets"
@@ -135,11 +137,6 @@ def _is_asset_route(canonical: str) -> bool:
     return not any(canonical == p or canonical.startswith(p + "/") for p in LOCAL_ONLY_ASSET_PREFIXES)
 
 
-def _is_asset_write(canonical: str, method: str) -> bool:
-    """Anything but reading the asset API."""
-    return _is_asset_route(canonical) and method not in ("GET", "HEAD")
-
-
 def _is_cpu_eligible(canonical: str) -> bool:
     return canonical in CPU_ELIGIBLE_EXACT or _is_asset_route(canonical) or any(
         canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES
@@ -161,7 +158,7 @@ def _cpu_target_configured() -> bool:
     return cpu_url != gpu_url
 
 
-def _use_cpu_target(canonical: str, method: str = "GET") -> bool:
+def _use_cpu_target(canonical: str) -> bool:
     """True if this request should go to the CPU-only target instead of the
     GPU one: only for file-only routes, only when a genuinely distinct CPU
     URL is configured, and only while a job isn't actually still running.
@@ -176,14 +173,12 @@ def _use_cpu_target(canonical: str, method: str = "GET") -> bool:
     that's on its way out anyway."""
     if not _is_cpu_eligible(canonical):
         return False
-    if _is_asset_write(canonical, method):
-        return False  # asset changes go to the GPU (see _should_proxy)
     if not _cpu_target_configured():
         return False
     return not state.has_incomplete_job()
 
 
-def _should_proxy(path: str, method: str = "GET") -> bool:
+def _should_proxy(path: str) -> bool:
     canonical = _strip_api_prefix(path)
     if canonical in ALWAYS_PROXY_EXACT:
         return True
@@ -196,8 +191,6 @@ def _should_proxy(path: str, method: str = "GET") -> bool:
         # genuinely distinct CPU target is configured to actually serve it —
         # _use_cpu_target() (checked again at dispatch time) decides which
         # target that is.
-        if _is_asset_write(canonical, method):
-            return _remote_known_active()  # changing an asset is never worth waking the GPU for
         return _remote_known_active() or _cpu_target_configured()
     if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
         return _remote_known_active()
@@ -673,7 +666,7 @@ async def proxy_middleware(request: web.Request, handler):
             if request.method != "GET":
                 view_local_path = None
 
-    if not _is_enabled() or not _should_proxy(path, request.method):
+    if not _is_enabled() or not _should_proxy(path):
         if _is_enabled():
             stub = _stub_fake_gpu_patch(request, canonical)
             if stub is not None:
@@ -699,7 +692,7 @@ async def proxy_middleware(request: web.Request, handler):
     # uploads, free, ...): stream through untouched, preserving encoding,
     # partial content, and status codes — to the CPU target when eligible
     # and the GPU isn't already active, otherwise to the GPU as usual.
-    use_cpu = _use_cpu_target(canonical, request.method)
+    use_cpu = _use_cpu_target(canonical)
     is_view_route = any(canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES)
     if use_cpu:
         logger.info(f"[ComfyUI Proxy] Using remote CPU container for {path} (GPU not active).")
