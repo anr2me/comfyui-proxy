@@ -412,6 +412,7 @@ async def _run_relay(client_id: str):
                         parsed = None
 
                     last_queue_remaining = _status_queue_remaining(parsed, last_queue_remaining)
+                    files_cache.note_message(parsed)  # remember that a job saved a file to the output folder
 
                     if not got_sid:
                         # This very first message arrives right after connecting,
@@ -555,6 +556,9 @@ async def _run_relay(client_id: str):
             # case this just fails quietly like any other refresh attempt would.
             await jobs_cache.refresh_known(reason=f"client {client_id} relay closing")
             await files_cache.refresh_known(reason=f"client {client_id} relay closing")
+            if not cancelled and finished_clean and not state.has_incomplete_job():
+                # The last job of the batch is done: one output scan, not one per job.
+                files_cache.scan_output_soon(reason=f"after the last job, client {client_id}")
             # A newer relay for the same client may have subscribed to logs
             # already; don't switch that subscription off underneath it.
             if _owns_slot(client_id, me):

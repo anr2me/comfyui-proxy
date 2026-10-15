@@ -16,6 +16,14 @@ computer's own files are never shown in place of the remote's: they may not
 exist there. The lists are kept in remote_files_cache.json next to the config,
 per remote URL, so they survive restarts.
 
+Output scan: with the assets system on only in the CPU container, nothing there
+learns about the files a job saved from the GPU container until it scans its
+output folder, which walks the whole folder. So the shadow relay (relay.py) tells
+this module when a job saved a file (note_message()), and when the last job of a
+batch has finished it calls scan_output_soon(): one scan request to the CPU
+container, in the background, and none at all if nothing was saved meanwhile or if
+the GPU container runs the assets system itself (it registers its own outputs).
+
 refresh_known() is called by the shadow relay (relay.py) right after a job
 finishes, while its connection still proves the GPU is awake, to bring the lists
 the panel has asked for up to date (new outputs, newly uploaded inputs). It is
@@ -50,6 +58,10 @@ _lock = threading.Lock()
 _cache = None  # {remote_url: {request key: {"t": saved at, "data": parsed JSON}}}
 _MISSING = object()
 _warned_disabled = set()  # remote URLs we already said have no assets system
+_output_dirty = False     # a job saved a file to the output folder since the last scan request
+_gpu_assets = {}          # GPU URL -> (does that container run the assets system?, when asked)
+_GPU_ASSETS_TTL = 600.0
+_background = set()       # keeps the background scan task from being garbage-collected
 
 
 def is_list_route(path: str) -> bool:
@@ -60,6 +72,14 @@ def _cpu_configured() -> bool:
     """A CPU URL that is set and different from the GPU one."""
     cpu = forwarder.target_base(True)
     return bool(cpu) and cpu != forwarder.target_base()
+
+
+def _auth_headers(use_cpu: bool) -> dict:
+    headers = {"Accept-Encoding": forwarder.get_safe_accept_encoding()}
+    auth_key = cfgmod.get("remote_cpu_auth_key" if use_cpu else "auth_key")
+    if auth_key:
+        headers["Authorization"] = f"Bearer {auth_key}"
+    return headers
 
 
 def _remote_key() -> str:
@@ -223,6 +243,99 @@ async def handle_request(request: web.Request, reachable: bool, use_cpu: bool) -
     resp = web.json_response(data)
     resp.headers["X-ComfyUI-Proxy-Cache"] = "saved"
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Output scan (see the module docstring)
+# ---------------------------------------------------------------------------
+
+def note_message(parsed):
+    """Remember that a job saved a file to the output folder: called for every
+    message the relay reads from the remote. An "executed" message carries the
+    node's outputs; only {"type": "output"} items are files in that folder
+    (previews are "temp")."""
+    global _output_dirty
+    if not isinstance(parsed, dict) or parsed.get("type") != "executed":
+        return
+    outputs = (parsed.get("data") or {}).get("output")
+    if not isinstance(outputs, dict):
+        return
+    for items in outputs.values():
+        if isinstance(items, list) and any(isinstance(i, dict) and i.get("type") == "output" for i in items):
+            _output_dirty = True
+            return
+
+
+async def _gpu_runs_assets(gpu_base: str) -> bool:
+    """Does the GPU container run the assets system (its /features says)? Then it
+    registers its own outputs. Unknown counts as no: better one scan too many."""
+    known = _gpu_assets.get(gpu_base)
+    if known is not None and time.time() - known[1] < _GPU_ASSETS_TTL:
+        return known[0]
+    try:
+        status, raw, _ctype = await _fetch("/features", False)
+    except (asyncio.TimeoutError, aiohttp.ClientError, RuntimeError, LookupError, UnicodeDecodeError):
+        return False
+    data = _parse(raw) if 200 <= status < 300 else _MISSING
+    if not isinstance(data, dict) or "assets" not in data:
+        return False
+    runs = bool(data["assets"])
+    _gpu_assets[gpu_base] = (runs, time.time())
+    return runs
+
+
+async def _post_output_scan(use_cpu: bool) -> int:
+    base = forwarder.target_base(use_cpu)
+    session = forwarder.get_tracking_session()
+    async with session.post(
+        f"{base}/api/assets/seed", json={"roots": ["output"]},
+        headers=_auth_headers(use_cpu), timeout=forwarder.get_timeout(),
+    ) as r:
+        await r.read()
+        return r.status
+
+
+async def _scan_output(reason: str):
+    global _output_dirty
+    if not _output_dirty:
+        return  # another call got here first
+    _output_dirty = False
+    try:
+        if await _gpu_runs_assets(forwarder.target_base()):
+            return  # that container registers the outputs it saves
+        if forwarder.circuit_is_open(True):
+            _output_dirty = True  # try again after the next batch
+            return
+        status = await _post_output_scan(True)
+    except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+        logger.warning(f"[ComfyUI Proxy] Could not ask the remote CPU to rescan its output folder ({reason}): {e}")
+        _output_dirty = True
+        return
+    if status in (200, 202):
+        logger.info(f"[ComfyUI Proxy] Asked the remote CPU to rescan its output folder, so the new results show up in the asset lists ({reason}).")
+    elif status == 409:
+        pass  # a scan is already running there; it will pick the new files up or the next one will
+    elif status == 503:
+        remote = _remote_key()
+        if remote not in _warned_disabled:
+            _warned_disabled.add(remote)
+            logger.warning(
+                "[ComfyUI Proxy] The remote CPU answered the output scan request with HTTP 503: its assets system is "
+                "probably off. Start it with --enable-assets (and without --disable-assets) to list new results."
+            )
+    else:
+        logger.warning(f"[ComfyUI Proxy] The remote CPU answered the output scan request with HTTP {status} ({reason}).")
+
+
+def scan_output_soon(reason: str = ""):
+    """Ask the remote CPU container to rescan its output folder — in the
+    background, and only if a job saved a file since the last request (see the
+    module docstring). The relay calls this when the last job has finished."""
+    if not _output_dirty or not _cpu_configured():
+        return
+    task = asyncio.ensure_future(_scan_output(reason))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 async def refresh_known(reason: str = ""):
