@@ -233,6 +233,31 @@ def _merge_remote_models(resp: web.StreamResponse, cache: dict, context: str = "
     return web.Response(body=json.dumps(data).encode("utf-8"), status=resp.status, content_type="application/json")
 
 
+def _hide_local_models(resp: web.StreamResponse, context: str = "/object_info") -> web.StreamResponse:
+    """No model list is cached for the current remote URL yet (the first fetch
+    is pending or failed). Offering the models found on this computer would
+    let users pick files that may not exist on the remote, so the model
+    dropdowns are emptied instead until a list arrives."""
+    if not isinstance(resp, web.Response):
+        return resp
+    try:
+        raw = resp.body
+        if not raw:
+            return resp
+        data = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"[ComfyUI Proxy] Could not parse local {context} JSON to hide local models: {e}")
+        return resp
+    hidden = models_cache.hide_local_models(data)
+    if not hidden:
+        return resp
+    logger.info(
+        f"[ComfyUI Proxy] No model list for this remote yet: emptied {hidden} local model "
+        f"dropdown field(s) in {context}."
+    )
+    return web.Response(body=json.dumps(data).encode("utf-8"), status=resp.status, content_type="application/json")
+
+
 # ---------------------------------------------------------------------------
 # Buffered (non-streamed) handlers for routes we need to introspect
 # ---------------------------------------------------------------------------
@@ -554,8 +579,7 @@ async def proxy_middleware(request: web.Request, handler):
             return resp
         cache = models_cache.cached_models()  # only a list cached for this exact remote URL
         if not cache:
-            logger.info(f"[ComfyUI Proxy] Skipping {path} model patch: no cached model list for this remote yet.")
-            return resp
+            return _hide_local_models(resp, context=path)  # no list for this remote yet: show no local models
         return _merge_remote_models(resp, cache, context=path)
 
     # /api/jobs GET: cache-aware handling, independent of the general

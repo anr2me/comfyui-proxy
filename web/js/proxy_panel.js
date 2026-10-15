@@ -381,7 +381,11 @@ app.registerExtension({
             try {
                 const cfg = await postConfig({ enabled: desired });
                 refreshUI(cfg);
-                if (cfg.models_refreshing) watchModelsRefresh();
+                if (cfg.models_refreshing) {
+                    watchModelsRefresh(); // dropdowns are refreshed once the list is in
+                } else {
+                    await refreshFrontendComboLists(); // what /object_info returns just changed
+                }
             } catch (e) {
                 console.error("[ComfyUI Proxy] Failed to update toggle", e);
                 toggle.checked = !desired;
@@ -475,6 +479,7 @@ app.registerExtension({
                 authInput.value = "";
                 cpuAuthInput.value = "";
                 statusLine.textContent = "Config reset to defaults.";
+                await refreshFrontendComboLists(); // the proxy is off again: local models are back
             } catch (e) {
                 console.error("[ComfyUI Proxy] Failed to reset config", e);
                 statusLine.textContent = "Failed to reset config — see console.";

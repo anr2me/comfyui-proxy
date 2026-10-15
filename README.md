@@ -120,9 +120,10 @@ Tap the pill, then the label, to open the panel.
   local files. The list is fetched when you save a URL or turn the proxy on;
   the panel says **Updating model list...** meanwhile, then **Remote model
   list cached (N fields)**. If it says **not yet cached**, the fetch failed
-  (see the console log) and you'll see your local models until it works.
-  Each list belongs to its URL: another server's list is never reused, and a
-  failed refresh keeps the last good list for the same URL. With a **Remote
+  (see the console log) and the model dropdowns stay empty until it works,
+  so you can't pick a model the server might not have. Each list belongs to
+  its URL: another server's list is never reused, and a failed refresh
+  keeps the last good list for the same URL. With a **Remote
   CPU URL** the list is fetched from that cheaper endpoint; without one the
   GPU is used if it's already up, and woken only when you have no list yet.
   Added models on the server? Use **Refresh Models** — it fetches right away,

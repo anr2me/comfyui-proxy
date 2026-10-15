@@ -68,6 +68,78 @@ def cached_models(cfg=None) -> dict:
     return {}
 
 
+_NOT_MODEL_FOLDERS = {"custom_nodes"}  # folder_paths entries that don't hold model files
+_PLACEHOLDER_OPTIONS = {"", "none", "None"}  # "no model" entries that sit in some dropdowns
+
+
+def _local_model_file_sets() -> list:
+    """The file list of every model folder this ComfyUI knows about
+    (checkpoints, loras, vae, controlnet, ...), taken from its own
+    folder_paths. Empty if folder_paths isn't available."""
+    try:
+        import folder_paths
+    except ImportError:
+        return []
+    file_sets = []
+    for name in list(getattr(folder_paths, "folder_names_and_paths", {})):
+        if name in _NOT_MODEL_FOLDERS:
+            continue
+        try:
+            files = folder_paths.get_filename_list(name)
+        except Exception:
+            continue
+        if files:
+            file_sets.append(frozenset(files))
+    return file_sets
+
+
+def _combo_options(pdef):
+    """The options list of a dropdown input definition, or None if it isn't
+    one. Handles both [[opt, ...], {...}] and ["COMBO", {"options": [...]}]."""
+    if isinstance(pdef, list) and pdef:
+        if isinstance(pdef[0], list):
+            return pdef[0]
+        if pdef[0] == "COMBO" and len(pdef) > 1 and isinstance(pdef[1], dict) \
+                and isinstance(pdef[1].get("options"), list):
+            return pdef[1]["options"]
+    return None
+
+
+def hide_local_models(data) -> int:
+    """Empty every dropdown in an /object_info dict (in place) whose options
+    are model files from this computer's own model folders. Used while the
+    proxy is on but no model list is cached for the remote yet: those local
+    files may not exist there, so offering none is safer than offering them.
+    Other dropdowns (samplers, schedulers, ...) are not touched. Returns how
+    many dropdowns were emptied."""
+    if not isinstance(data, dict):
+        return 0
+    file_sets = _local_model_file_sets()
+    if not file_sets:
+        return 0
+    hidden = 0
+    for node_info in data.values():
+        inputs = node_info.get("input") if isinstance(node_info, dict) else None
+        if not isinstance(inputs, dict):
+            continue
+        for group in ("required", "optional"):
+            group_inputs = inputs.get(group)
+            if not isinstance(group_inputs, dict):
+                continue
+            for pdef in group_inputs.values():
+                options = _combo_options(pdef)
+                if not options:
+                    continue
+                real = {o for o in options if isinstance(o, str) and o not in _PLACEHOLDER_OPTIONS}
+                if real and any(real <= files for files in file_sets):
+                    if isinstance(pdef[0], list):
+                        pdef[0] = []
+                    else:
+                        pdef[1]["options"] = []
+                    hidden += 1
+    return hidden
+
+
 def needs_refresh() -> bool:
     """True when there is a remote URL but no model list cached for it yet."""
     gpu_base = forwarder.target_base()
