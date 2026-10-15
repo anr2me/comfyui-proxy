@@ -130,16 +130,17 @@ Tap the pill, then the label, to open the panel.
   waking the GPU (or the CPU endpoint) if needed. If the dropdowns still look
   stale, reload the ComfyUI browser tab.
 - The **Imported** tab of the Media Assets panel lists the files on the
-  remote (those you uploaded or imported), not the ones on your computer —
-  also when ComfyUI runs with `--enable-assets` on both sides (the remote
-  needs it too). They're read from your **Remote CPU URL** if you have one,
-  or from the GPU while it's running; opening the panel never wakes the GPU.
-  If your CPU and GPU containers share one user folder, they share one assets
-  database too — which is what the proxy expects, so an asset means the same
-  thing on both (separate databases would make previews and changes fail).
-  Otherwise you see the last list the proxy got (kept in
-  `remote_files_cache.json` in this folder, separately for each URL), or an
-  empty one if it never got any.
+  remote (those you uploaded or imported), not the ones on your computer.
+  They're read from your **Remote CPU URL** if you have one, or from the GPU
+  while it's running; opening the panel never wakes the GPU. Otherwise you
+  see the last list the proxy got (kept in `remote_files_cache.json` in this
+  folder, separately for each URL), or an empty one if it never got any.
+  With `--enable-assets` on your local ComfyUI the panel uses the asset lists
+  instead, with previews and edits too, and the proxy answers all of it from
+  the remote. Safest: when you have a **Remote CPU URL**, turn the assets
+  system on only for that CPU container and leave it off on the GPU one. If
+  both containers run it on one shared user folder, ComfyUI's lock on the
+  database may not hold across them (watch for "database is locked").
 - If your computer has no GPU of its own, the Crystools resource monitor
   lists a placeholder one (an NVIDIA L4 by default) so its GPU meters still
   appear; while a job runs it shows the remote GPU's real readings. To

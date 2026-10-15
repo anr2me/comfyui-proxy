@@ -40,8 +40,9 @@ Routing rules:
     (the Imported tab) and, with --enable-assets, GET /api/assets — come from
     the remote, and the last list seen is kept (files_cache.py) to show while
     the remote is asleep. The rest of the asset API (/api/assets/<id>, its
-    content, ...) is forwarded like /view; only /api/assets/seed and
-    /api/assets/prune stay local, since they scan this computer's folders.
+    content, ...) is forwarded too — to the CPU endpoint when there is one,
+    else the GPU while it's up; only /api/assets/seed and /api/assets/prune
+    stay local, since they scan this computer's folders.
   - GET /crystools/monitor/GPU (and its /api alias) that stays local — i.e.
     isn't forwarded because no job is active — has an empty "no GPU" answer
     replaced with a fake GPU (config.GPU_NAME / GPU_COUNT), so Crystools'
@@ -96,10 +97,11 @@ GPU_ONLY_CONDITIONAL_PREFIXES = ("/history",)
 CPU_ELIGIBLE_EXACT = {"/upload/image", "/upload/mask"}
 CPU_ELIGIBLE_PREFIXES = ("/view", "/viewvideo")
 # The asset API of an --enable-assets remote, as _strip_api_prefix() sees it
-# ("/api/assets/..." -> "/assets/..."). Reads and changes alike are treated like
-# /view: the CPU endpoint when one is configured and no job is running, else the
-# GPU while it's up. This relies on both containers sharing one assets database,
-# so an asset ID means the same thing on either. Kept apart from
+# ("/api/assets/..." -> "/assets/..."). Reads and changes alike go to the CPU
+# endpoint whenever one is configured (even while a job runs), so every asset ID
+# comes from that one container's database, and the GPU container doesn't need
+# the assets system at all; without a CPU endpoint they go to the GPU, while it's
+# up. Kept apart from
 # CPU_ELIGIBLE_PREFIXES, which also counts as "viewing" (keepalive.py). Its scan
 # controls act on this computer's own folders, so they stay local.
 ASSET_PREFIX = "/assets"
@@ -175,6 +177,8 @@ def _use_cpu_target(canonical: str) -> bool:
         return False
     if not _cpu_target_configured():
         return False
+    if _is_asset_route(canonical):
+        return True  # always the CPU endpoint, job or not (see ASSET_PREFIX)
     return not state.has_incomplete_job()
 
 
@@ -618,7 +622,7 @@ async def proxy_middleware(request: web.Request, handler):
     # waking the GPU, otherwise the last list seen (files_cache.py) — never this
     # computer's own files, which the remote may not have.
     if _is_enabled() and request.method == "GET" and files_cache.is_list_route(path):
-        cpu = _cpu_target_configured() and not state.has_incomplete_job()
+        cpu = _cpu_target_configured()  # like the rest of the asset API: the CPU endpoint whenever there is one
         return await files_cache.handle_request(request, cpu or _remote_known_active(), cpu)
 
     # POST /history (or /api/history) with {"clear": true} or {"delete": [ids]}

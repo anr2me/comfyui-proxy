@@ -6,9 +6,8 @@ The file lists behind the Media Assets panel: GET /internal/files/input (the
 Both just list files on the machine ComfyUI runs on, so left alone they list
 THIS computer's files — not the ones on the remote, which is where the workflows
 actually run. With the proxy on they are asked of the remote instead, the same
-way /view is: the CPU endpoint when one is configured and no job is running,
-otherwise the GPU, but only if it's already up — opening the panel is never
-worth a cold start.
+way /view is: the CPU endpoint whenever one is configured, otherwise the GPU,
+but only if it's already up — opening the panel is never worth waking the GPU.
 
 When the remote can't be reached that way (asleep, no CPU endpoint, just failed,
 or the assets system is off over there), the last list seen for this remote URL
@@ -19,7 +18,8 @@ per remote URL, so they survive restarts.
 
 refresh_known() is called by the shadow relay (relay.py) right after a job
 finishes, while its connection still proves the GPU is awake, to bring the lists
-the panel has asked for up to date (new outputs, newly uploaded inputs).
+the panel has asked for up to date (new outputs, newly uploaded inputs). It is
+only needed without a CPU endpoint: with one, the lists are read from it on demand.
 """
 
 import asyncio
@@ -54,6 +54,12 @@ _warned_disabled = set()  # remote URLs we already said have no assets system
 
 def is_list_route(path: str) -> bool:
     return path == FILES_PATH or path == ASSETS_PATH
+
+
+def _cpu_configured() -> bool:
+    """A CPU URL that is set and different from the GPU one."""
+    cpu = forwarder.target_base(True)
+    return bool(cpu) and cpu != forwarder.target_base()
 
 
 def _remote_key() -> str:
@@ -224,6 +230,8 @@ async def refresh_known(reason: str = ""):
     recent few), which saves them. Called while the GPU is known to be awake."""
     if not forwarder.target_base() or forwarder.circuit_is_open():
         return
+    if _cpu_configured():
+        return  # the lists are read from the CPU endpoint, which wakes on demand
     remote = _remote_key()
     keys = await asyncio.to_thread(_recent_keys, remote, REFRESH_KEYS)
     refreshed = 0
