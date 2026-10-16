@@ -96,16 +96,19 @@ GPU_ONLY_CONDITIONAL_PREFIXES = ("/history",)
 # configured — see _use_cpu_target().
 CPU_ELIGIBLE_EXACT = {"/upload/image", "/upload/mask"}
 CPU_ELIGIBLE_PREFIXES = ("/view", "/viewvideo")
-# The asset API of an --enable-assets remote, as _strip_api_prefix() sees it
-# ("/api/assets/..." -> "/assets/..."). Reads and changes alike go to the CPU
-# endpoint whenever one is configured (even while a job runs), so every asset ID
-# comes from that one container's database, and the GPU container doesn't need
-# the assets system at all; without a CPU endpoint they go to the GPU, while it's
-# up. Kept apart from
+# The asset API of an --enable-assets remote: "/api/assets...", and only that.
+# Reads and changes alike go to the CPU endpoint whenever one is configured (even
+# while a job runs), so every asset ID comes from that one container's database,
+# and the GPU container doesn't need the assets system at all; without a CPU
+# endpoint they go to the GPU, while it's up. Kept apart from
 # CPU_ELIGIBLE_PREFIXES, which also counts as "viewing" (keepalive.py). Its scan
 # controls act on this computer's own folders, so they stay local.
-ASSET_PREFIX = "/assets"
-LOCAL_ONLY_ASSET_PREFIXES = ("/assets/seed", "/assets/prune")
+# NOT "/assets/...": that is where the frontend's own static files (the .js and
+# .css bundles) are served from, which must always come from this computer. So
+# this is matched against the real request path, never the canonical one that
+# _strip_api_prefix() makes by removing "/api" (it would make the two look alike).
+ASSET_PREFIX = "/api/assets"
+LOCAL_ONLY_ASSET_PREFIXES = ("/api/assets/seed", "/api/assets/prune")
 # "/api/crystools" is its own real namespace (not an alias of a plain route).
 # "/api/jobs" GET requests are handled separately below (with a local
 # response cache); this prefix only still matters here for any other method.
@@ -133,14 +136,14 @@ def _remote_known_active() -> bool:
     return state.has_incomplete_job() or relay.has_active_relay()
 
 
-def _is_asset_route(canonical: str) -> bool:
-    if canonical != ASSET_PREFIX and not canonical.startswith(ASSET_PREFIX + "/"):
+def _is_asset_route(path: str) -> bool:
+    if path != ASSET_PREFIX and not path.startswith(ASSET_PREFIX + "/"):
         return False
-    return not any(canonical == p or canonical.startswith(p + "/") for p in LOCAL_ONLY_ASSET_PREFIXES)
+    return not any(path == p or path.startswith(p + "/") for p in LOCAL_ONLY_ASSET_PREFIXES)
 
 
-def _is_cpu_eligible(canonical: str) -> bool:
-    return canonical in CPU_ELIGIBLE_EXACT or _is_asset_route(canonical) or any(
+def _is_cpu_eligible(canonical: str, path: str) -> bool:
+    return canonical in CPU_ELIGIBLE_EXACT or _is_asset_route(path) or any(
         canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES
     )
 
@@ -160,7 +163,7 @@ def _cpu_target_configured() -> bool:
     return cpu_url != gpu_url
 
 
-def _use_cpu_target(canonical: str) -> bool:
+def _use_cpu_target(canonical: str, path: str) -> bool:
     """True if this request should go to the CPU-only target instead of the
     GPU one: only for file-only routes, only when a genuinely distinct CPU
     URL is configured, and only while a job isn't actually still running.
@@ -173,11 +176,11 @@ def _use_cpu_target(canonical: str) -> bool:
     still open, so new file-serving requests in that window are better sent
     to the CPU target (when configured) than forced onto a GPU container
     that's on its way out anyway."""
-    if not _is_cpu_eligible(canonical):
+    if not _is_cpu_eligible(canonical, path):
         return False
     if not _cpu_target_configured():
         return False
-    if _is_asset_route(canonical):
+    if _is_asset_route(path):
         return True  # always the CPU endpoint, job or not (see ASSET_PREFIX)
     return not state.has_incomplete_job()
 
@@ -190,7 +193,7 @@ def _should_proxy(path: str) -> bool:
         return _remote_known_active()
     if any(canonical == p or canonical.startswith(p + "/") for p in GPU_ONLY_CONDITIONAL_PREFIXES):
         return _remote_known_active()
-    if _is_cpu_eligible(canonical):
+    if _is_cpu_eligible(canonical, path):
         # Still worth proxying even while the GPU is idle, as long as a
         # genuinely distinct CPU target is configured to actually serve it —
         # _use_cpu_target() (checked again at dispatch time) decides which
@@ -696,7 +699,7 @@ async def proxy_middleware(request: web.Request, handler):
     # uploads, free, ...): stream through untouched, preserving encoding,
     # partial content, and status codes — to the CPU target when eligible
     # and the GPU isn't already active, otherwise to the GPU as usual.
-    use_cpu = _use_cpu_target(canonical)
+    use_cpu = _use_cpu_target(canonical, path)
     is_view_route = any(canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES)
     if use_cpu:
         logger.info(f"[ComfyUI Proxy] Using remote CPU container for {path} (GPU not active).")
