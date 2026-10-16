@@ -4,6 +4,12 @@ jobs_history.db-wal
 jobs_history.db-shm
 # Old databases set aside when their layout doesn't match this version
 jobs_history.db.*.bak*
-# Last remote file lists, shown while the remote is asleep (see proxy/files_cache.py)
+# Last remote file lists, shown while the remote is asleep (see proxy/files_db.py)
+remote_files.db
+remote_files.db-wal
+remote_files.db-shm
+# Old databases set aside when their layout doesn't match this version
+remote_files.db.*.bak*
+# Their earlier JSON format (imported into the database, then removed)
 remote_files_cache.json
 remote_files_cache.json.tmp

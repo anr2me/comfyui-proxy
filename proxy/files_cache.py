@@ -13,8 +13,8 @@ When the remote can't be reached that way (asleep, no CPU endpoint, just failed,
 or the assets system is off over there), the last list seen for this remote URL
 and request is shown instead, and an empty one if there never was any. This
 computer's own files are never shown in place of the remote's: they may not
-exist there. The lists are kept in remote_files_cache.json next to the config,
-per remote URL, so they survive restarts.
+exist there. The lists are kept in a small SQLite database next to the config
+(remote_files.db, see files_db.py), per remote URL, so they survive restarts.
 
 Output scan: with the assets system on only in the CPU container, nothing there
 learns about the files a job saved from the GPU container until it scans its
@@ -33,8 +33,6 @@ only needed without a CPU endpoint: with one, the lists are read from it on dema
 import asyncio
 import json
 import logging
-import os
-import threading
 import time
 from urllib.parse import urlencode
 
@@ -42,20 +40,18 @@ import aiohttp
 from aiohttp import web
 
 from . import config as cfgmod
+from . import files_db
 from . import forwarder
 
 logger = logging.getLogger("ComfyUIProxy")
 
-FILES_PATH = "/internal/files/input"
+FILES_PATH = files_db.FILES_ROUTE
 ASSETS_PATH = "/api/assets"
 
-CACHE_PATH = os.path.join(os.path.dirname(cfgmod.CONFIG_PATH), "remote_files_cache.json")
 MAX_KEYS_PER_REMOTE = 40  # distinct requests (path + query) kept per remote URL; oldest dropped first
 REFRESH_KEYS = 6          # how many of the most recent ones refresh_known() asks the remote again
 _CONDITIONAL_HEADERS = {"if-none-match", "if-modified-since", "if-range", "range"}
 
-_lock = threading.Lock()
-_cache = None  # {remote_url: {request key: {"t": saved at, "data": parsed JSON}}}
 _MISSING = object()
 _warned_disabled = set()  # remote URLs we already said have no assets system
 _output_dirty = False     # a job saved a file to the output folder since the last scan request
@@ -100,63 +96,28 @@ def _empty_answer(path: str):
 def _valid(key: str, data) -> bool:
     """Does `data` look like what that route answers with?"""
     if key.split("?", 1)[0] == FILES_PATH:
-        return isinstance(data, list)
-    return isinstance(data, dict) and isinstance(data.get("assets"), list)
+        return isinstance(data, list) and all(isinstance(name, str) for name in data)
+    return (
+        isinstance(data, dict) and isinstance(data.get("assets"), list)
+        and all(isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"] for a in data["assets"])
+    )
 
 
 # ---------------------------------------------------------------------------
-# Saved lists (blocking file access: always called through asyncio.to_thread)
+# Saved lists (blocking database access: always called through asyncio.to_thread)
 # ---------------------------------------------------------------------------
-
-def _load_locked() -> dict:
-    global _cache
-    if _cache is None:
-        try:
-            with open(CACHE_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            _cache = data if isinstance(data, dict) else {}
-        except FileNotFoundError:
-            _cache = {}
-        except Exception as e:
-            logger.warning(f"[ComfyUI Proxy] Could not read {os.path.basename(CACHE_PATH)} ({e}); starting with no saved file lists.")
-            _cache = {}
-    return _cache
-
-
-def _save_locked():
-    tmp = CACHE_PATH + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_cache, f)
-        os.replace(tmp, CACHE_PATH)
-    except Exception as e:
-        logger.warning(f"[ComfyUI Proxy] Could not save {os.path.basename(CACHE_PATH)}: {e}")
-
 
 def _store(remote: str, key: str, data):
-    with _lock:
-        entries = _load_locked().setdefault(remote, {})
-        old = entries.get(key)
-        if isinstance(old, dict) and old.get("data") == data:
-            return  # unchanged: no reason to rewrite the file
-        entries[key] = {"t": time.time(), "data": data}
-        while len(entries) > MAX_KEYS_PER_REMOTE:
-            del entries[min(entries, key=lambda k: entries[k].get("t", 0))]
-        _save_locked()
+    files_db.store(remote, key, data, MAX_KEYS_PER_REMOTE)
 
 
 def _lookup(remote: str, key: str):
-    with _lock:
-        entry = _load_locked().get(remote, {}).get(key)
-        if isinstance(entry, dict) and "data" in entry:
-            return entry["data"]
-    return _MISSING
+    data = files_db.load(remote, key)
+    return _MISSING if data is None else data
 
 
 def _recent_keys(remote: str, count: int) -> list:
-    with _lock:
-        entries = _load_locked().get(remote, {})
-        return sorted(entries, key=lambda k: entries[k].get("t", 0), reverse=True)[:count]
+    return files_db.recent_keys(remote, count)
 
 
 # ---------------------------------------------------------------------------

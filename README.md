@@ -133,8 +133,8 @@ Tap the pill, then the label, to open the panel.
   remote (those you uploaded or imported), not the ones on your computer.
   They're read from your **Remote CPU URL** if you have one, or from the GPU
   while it's running; opening the panel never wakes the GPU. Otherwise you
-  see the last list the proxy got (kept in `remote_files_cache.json` in this
-  folder, separately for each URL), or an empty one if it never got any.
+  see the last list the proxy got (kept in `remote_files.db` in this folder,
+  separately for each URL), or an empty one if it never got any.
   With `--enable-assets` on your local ComfyUI the panel uses the asset lists
   instead, with previews and edits too, and the proxy answers all of it from
   the remote.  </br>_Safest:_ when you have a **Remote CPU URL**, turn the assets
