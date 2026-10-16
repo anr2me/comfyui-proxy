@@ -131,10 +131,13 @@ Tap the pill, then the label, to open the panel.
   stale, reload the ComfyUI browser tab.
 - The **Imported** tab of the Media Assets panel lists the files on the
   remote (those you uploaded or imported), not the ones on your computer.
-  They're read from your **Remote CPU URL** if you have one, or from the GPU
-  while it's running; opening the panel never wakes the GPU. Otherwise you
-  see the last list the proxy got (kept in `remote_files.db` in this folder,
-  separately for each URL), or an empty one if it never got any.
+  That list is kept on your computer (in `remote_files.db`, separately for
+  each URL) and updated whenever you upload a file, so opening the tab wakes
+  nothing. The remote is only asked when there's no saved list yet or it's
+  over a day old — your **Remote CPU URL** if you have one, else the GPU if
+  it's running; if neither can be asked you keep seeing the saved list (an
+  empty one if there never was any). The asset lists below are asked of the
+  remote each time.
   With `--enable-assets` on your local ComfyUI the panel uses the asset lists
   instead, with previews and edits too, and the proxy answers all of it from
   the remote.  </br>_Safest:_ when you have a **Remote CPU URL**, turn the assets

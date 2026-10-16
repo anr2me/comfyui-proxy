@@ -314,3 +314,12 @@ def recent_keys(remote, count) -> list:
     """The most recently saved requests of this remote, newest first."""
     return _run(lambda conn: [r[0] for r in conn.execute(
         "SELECT key FROM lists WHERE remote = ? ORDER BY saved_at DESC LIMIT ?", (remote, count))], default=[])
+
+
+def age(remote, key):
+    """Seconds since the answer to `key` was last saved or confirmed unchanged,
+    or None if there is none."""
+    def work(conn):
+        row = conn.execute("SELECT saved_at FROM lists WHERE remote = ? AND key = ?", (remote, key)).fetchone()
+        return None if row is None else max(0.0, time.time() - row[0])
+    return _run(work, default=None)

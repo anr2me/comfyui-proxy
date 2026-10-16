@@ -39,7 +39,9 @@ Routing rules:
   - The file lists behind the Media Assets panel — GET /internal/files/input
     (the Imported tab) and, with --enable-assets, GET /api/assets — come from
     the remote, and the last list seen is kept (files_cache.py) to show while
-    the remote is asleep. The rest of the asset API (/api/assets/<id>, its
+    the remote is asleep. The Imported list is shown from that saved copy (it
+    only changes by uploads, after which it is refreshed) instead of waking the
+    remote whenever the tab is opened. The rest of the asset API (/api/assets/<id>, its
     content, ...) is forwarded too — to the CPU endpoint when there is one,
     else the GPU while it's up; only /api/assets/seed and /api/assets/prune
     stay local, since they scan this computer's folders.
@@ -712,7 +714,13 @@ async def proxy_middleware(request: web.Request, handler):
             # keep the GPU warm for continued viewing/playback.
             keepalive.note_view_activity()
     sink = viewcache.make_sink(view_local_path, request, use_cpu) if view_local_path else None
-    return await forwarder.forward_http(request, use_cpu=use_cpu, sink=sink)
+    resp = await forwarder.forward_http(request, use_cpu=use_cpu, sink=sink)
+    if request.method == "POST" and canonical in ("/upload/image", "/upload/mask") and 200 <= resp.status < 300:
+        # An upload is what changes the Imported list: refresh the saved copy now,
+        # from the container that took it (it is awake), so opening the tab later
+        # needs no request to the remote at all (files_cache.py).
+        files_cache.refresh_input_soon(use_cpu)
+    return resp
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,14 @@ computer's own files are never shown in place of the remote's: they may not
 exist there. The lists are kept in a small SQLite database next to the config
 (remote_files.db, see files_db.py), per remote URL, so they survive restarts.
 
+The Imported tab's list (/internal/files/input) only changes when something is
+uploaded, so it is shown from the saved copy without asking the remote at all —
+a CPU endpoint would otherwise be woken every time the tab is opened. The proxy
+refreshes the saved copy itself right after an upload it forwarded
+(refresh_input_soon(), asking the container that took the upload, which is awake
+then). The remote is only asked when there is no saved list yet, or the saved one
+is older than INPUT_LIST_MAX_AGE (files added some other way get picked up then).
+
 Output scan: with the assets system on only in the CPU container, nothing there
 learns about the files a job saved from the GPU container until it scans its
 output folder, which walks the whole folder. So the shadow relay (relay.py) tells
@@ -50,6 +58,7 @@ ASSETS_PATH = "/api/assets"
 
 MAX_KEYS_PER_REMOTE = 40  # distinct requests (path + query) kept per remote URL; oldest dropped first
 REFRESH_KEYS = 6          # how many of the most recent ones refresh_known() asks the remote again
+INPUT_LIST_MAX_AGE = 24 * 3600.0  # seconds the Imported list is shown from the saved copy before the remote is asked again
 _CONDITIONAL_HEADERS = {"if-none-match", "if-modified-since", "if-range", "range"}
 
 _MISSING = object()
@@ -58,6 +67,7 @@ _output_dirty = False     # a job saved a file to the output folder since the la
 _gpu_assets = {}          # GPU URL -> (does that container run the assets system?, when asked)
 _GPU_ASSETS_TTL = 600.0
 _background = set()       # keeps the background scan task from being garbage-collected
+_input_refresh = {"running": False, "again": False}  # coalesces refreshes of the Imported list
 
 
 def is_list_route(path: str) -> bool:
@@ -164,6 +174,18 @@ async def handle_request(request: web.Request, reachable: bool, use_cpu: bool) -
     remote = _remote_key()
     key = _request_key(path, request.rel_url.query)
     label = "CPU" if use_cpu else "GPU"
+
+    if path == FILES_PATH:
+        # The Imported list only changes by uploads, which refresh it (see
+        # refresh_input_soon()): no need to ask the remote — and wake a CPU
+        # endpoint — every time the tab is opened.
+        age = await asyncio.to_thread(files_db.age, remote, key)
+        if age is not None and age < INPUT_LIST_MAX_AGE:
+            data = await asyncio.to_thread(_lookup, remote, key)
+            if data is not _MISSING:
+                resp = web.json_response(data)
+                resp.headers["X-ComfyUI-Proxy-Cache"] = "saved"
+                return resp
 
     if reachable and not forwarder.circuit_is_open(use_cpu):
         try:
@@ -295,6 +317,40 @@ def scan_output_soon(reason: str = ""):
     if not _output_dirty or not _cpu_configured():
         return
     task = asyncio.ensure_future(_scan_output(reason))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+async def _refresh_input(use_cpu: bool, reason: str):
+    if _input_refresh["running"]:
+        _input_refresh["again"] = True  # one more round once the current one is done
+        return
+    _input_refresh["running"] = True
+    try:
+        while True:
+            _input_refresh["again"] = False
+            try:
+                status, raw, _ctype = await _fetch(FILES_PATH, use_cpu)
+            except (asyncio.TimeoutError, aiohttp.ClientError, RuntimeError, LookupError, UnicodeDecodeError) as e:
+                logger.warning(f"[ComfyUI Proxy] Could not refresh the saved Imported file list ({reason}): {e}")
+                return
+            if 200 <= status < 300:
+                data = _parse(raw)
+                if data is not _MISSING and _valid(FILES_PATH, data):
+                    await asyncio.to_thread(_store, _remote_key(), FILES_PATH, data)
+            if not _input_refresh["again"]:
+                return
+    finally:
+        _input_refresh["running"] = False
+
+
+def refresh_input_soon(use_cpu: bool, reason: str = "upload"):
+    """Bring the saved Imported list up to date, in the background, from the
+    container that has just taken an upload (so it is awake). Several uploads in
+    a row make at most one extra round."""
+    if not forwarder.target_base(use_cpu):
+        return
+    task = asyncio.ensure_future(_refresh_input(use_cpu, reason))
     _background.add(task)
     task.add_done_callback(_background.discard)
 
