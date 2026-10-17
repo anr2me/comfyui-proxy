@@ -18,6 +18,11 @@ function savePos(pos) {
     }
 }
 
+// Default of the "Unresponsive-GPU polling cooldown" setting, used as the placeholder and
+// wherever the field is empty or invalid. Keep it equal to
+// DEFAULT_CONFIG["circuit_breaker_cooldown"] in proxy/config.py.
+const DEFAULT_CIRCUIT_COOLDOWN_S = 70;
+
 // --- Long waits for a cold-starting GPU --------------------------------------
 // ComfyUI's frontend aborts any api.fetchApi() call that hasn't received response
 // headers within 60 s ("TimeoutError: Fetch timeout", shown as a "Prompt execution
@@ -184,7 +189,7 @@ app.registerExtension({
             "on, the Run button (and file uploads) wait this long plus 30 seconds too, instead of ComfyUI's own " +
             "60-second limit.";
         const circuitCooldownInput = field(
-            "Unresponsive-GPU polling cooldown (seconds)", "number", "30"
+            "Unresponsive-GPU polling cooldown (seconds)", "number", String(DEFAULT_CIRCUIT_COOLDOWN_S)
         );
         circuitCooldownInput.title =
             "After /queue or /api/jobs fails to respond, pauses automatic polling of it for this long " +
@@ -315,7 +320,7 @@ app.registerExtension({
             timeoutInput.value = cfg.timeout || 300;
             delayInput.value = cfg.post_completion_delay ?? 5;
             jobsHistoryInput.value = cfg.jobs_history_max_entries ?? 500;
-            circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? 30;
+            circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? DEFAULT_CIRCUIT_COOLDOWN_S;
             autoDlInput.checked = !!cfg.auto_download_viewed;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
             keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 20;
@@ -408,7 +413,7 @@ app.registerExtension({
             };
             if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = 5;
             if (isNaN(patch.jobs_history_max_entries) || patch.jobs_history_max_entries < 1) patch.jobs_history_max_entries = 500;
-            if (isNaN(patch.circuit_breaker_cooldown) || patch.circuit_breaker_cooldown < 1) patch.circuit_breaker_cooldown = 30;
+            if (isNaN(patch.circuit_breaker_cooldown) || patch.circuit_breaker_cooldown < 1) patch.circuit_breaker_cooldown = DEFAULT_CIRCUIT_COOLDOWN_S;
             if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = 20;
             if (authInput.value.trim()) {
                 patch.auth_key = authInput.value.trim();

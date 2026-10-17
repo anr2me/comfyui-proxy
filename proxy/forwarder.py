@@ -70,7 +70,8 @@ def _circuit_breaker_cooldown() -> float:
     # different idle windows, so a one-size-fits-all cooldown may not give
     # a given provider's own idle-timeout enough of a quiet period to
     # actually kick in.
-    return max(1.0, float(cfgmod.get("circuit_breaker_cooldown", 30) or 30))
+    default = cfgmod.DEFAULT_CONFIG["circuit_breaker_cooldown"]  # the one place the default lives
+    return max(1.0, float(cfgmod.get("circuit_breaker_cooldown", default) or default))
 
 
 def _circuit_max_failures() -> int:
