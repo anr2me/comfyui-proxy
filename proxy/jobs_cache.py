@@ -55,10 +55,7 @@ def _remote_key() -> str:
 
 
 def _max_entries() -> int:
-    try:
-        return max(1, int(cfgmod.get("jobs_history_max_entries", 500) or 500))
-    except (TypeError, ValueError):
-        return 500
+    return int(cfgmod.number("jobs_history_max_entries", 1))
 
 
 class _ListQuery:

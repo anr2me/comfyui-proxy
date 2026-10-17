@@ -475,7 +475,7 @@ async def _run_relay(client_id: str):
                             # below, right before this connection closes and
                             # that proof-of-liveness goes away) happens once,
                             # unconditionally, in the finally block.
-                            delay = float(cfgmod.get("post_completion_delay", 5) or 0)
+                            delay = cfgmod.number("post_completion_delay", 0.0, zero_is_valid=True)
                             if delay > 0:
                                 logger.info(
                                     f"[ComfyUI Proxy] No jobs left on remote GPU for client {client_id}; "

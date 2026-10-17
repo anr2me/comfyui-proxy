@@ -7,6 +7,7 @@ file directly.
 """
 
 import json
+import math
 import os
 import threading
 
@@ -130,6 +131,25 @@ def update_config(patch: dict):
 
 def get(key, default=None):
     return load_config().get(key, default)
+
+
+def number(key: str, minimum=None, zero_is_valid: bool = False) -> float:
+    """A numeric setting as a float: the saved value, or its default from
+    DEFAULT_CONFIG when that is missing, empty, not a usable number — or 0,
+    unless `zero_is_valid` (for settings where 0 means something) — and never
+    below `minimum`. Everything that reads such a setting goes through here, so a
+    default is written down once, in DEFAULT_CONFIG, and nowhere else."""
+    default = float(DEFAULT_CONFIG[key])
+    try:
+        value = float(get(key))
+    except (TypeError, ValueError):
+        value = default
+    else:
+        if not math.isfinite(value) or (value == 0 and not zero_is_valid):
+            value = default
+    if minimum is not None:
+        value = max(float(minimum), value)
+    return value
 
 
 def reset_to_defaults():

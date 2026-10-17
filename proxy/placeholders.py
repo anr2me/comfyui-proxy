@@ -50,14 +50,11 @@ _items = {}  # id -> Placeholder, oldest first
 
 def lifetime() -> float:
     """Seconds a placeholder may live: the Timeout setting plus a margin."""
+    timeout = cfgmod.number("timeout", 5.0)  # the same value (and floor) the requests themselves use
     try:
-        timeout = float(cfgmod.get("timeout", 300) or 300)
-    except (TypeError, ValueError):
-        timeout = 300.0
-    try:
-        margin = float(getattr(cfgmod, "QUEUE_PLACEHOLDER_MARGIN", 60))
-    except (TypeError, ValueError):
-        margin = 60.0
+        margin = float(cfgmod.QUEUE_PLACEHOLDER_MARGIN)
+    except (AttributeError, TypeError, ValueError):
+        margin = 0.0
     return timeout + max(0.0, margin)
 
 

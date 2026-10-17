@@ -35,11 +35,11 @@ def seconds_since_last_view() -> float:
 
 
 def enabled() -> bool:
-    return bool(cfgmod.get("gpu_keepalive_enabled", False))
+    return bool(cfgmod.get("gpu_keepalive_enabled"))
 
 
 def idle_timeout() -> float:
-    return max(5.0, float(cfgmod.get("gpu_keepalive_idle_timeout", 60) or 60))
+    return cfgmod.number("gpu_keepalive_idle_timeout", 5.0)
 
 
 def stop():

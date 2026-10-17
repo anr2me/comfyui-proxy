@@ -18,11 +18,6 @@ function savePos(pos) {
     }
 }
 
-// Default of the "Unresponsive-GPU polling cooldown" setting, used as the placeholder and
-// wherever the field is empty or invalid. Keep it equal to
-// DEFAULT_CONFIG["circuit_breaker_cooldown"] in proxy/config.py.
-const DEFAULT_CIRCUIT_COOLDOWN_S = 70;
-
 // --- Long waits for a cold-starting GPU --------------------------------------
 // ComfyUI's frontend aborts any api.fetchApi() call that hasn't received response
 // headers within 60 s ("TimeoutError: Fetch timeout", shown as a "Prompt execution
@@ -183,21 +178,20 @@ app.registerExtension({
         const authInput = field("Remote GPU Auth Key (optional)", "password", "Bearer token");
         const cpuUrlInput = field("Remote CPU URL (optional)", "text", "https://your-cpu-endpoint.example.com");
         const cpuAuthInput = field("Remote CPU Auth Key (optional)", "password", "Bearer token");
-        const timeoutInput = field("Timeout (seconds)", "number", "300");
+        // The placeholders (the defaults) are filled in by refreshUI(), from what the server sends.
+        const timeoutInput = field("Timeout (seconds)", "number");
         timeoutInput.title =
             "How long the proxy waits for the remote GPU to answer, including a cold start. While the proxy is " +
-            "on, the Run button (and file uploads) wait this long plus 30 seconds too, instead of ComfyUI's own " +
+            "on, the Run button (and file uploads) wait this long plus " + LONG_WAIT_MARGIN_MS / 1000 + " seconds too, instead of ComfyUI's own " +
             "60-second limit.";
-        const circuitCooldownInput = field(
-            "Unresponsive-GPU polling cooldown (seconds)", "number", String(DEFAULT_CIRCUIT_COOLDOWN_S)
-        );
+        const circuitCooldownInput = field("Unresponsive-GPU polling cooldown (seconds)", "number");
         circuitCooldownInput.title =
             "After /queue or /api/jobs fails to respond, pauses automatic polling of it for this long " +
             "before trying again, instead of repeatedly re-attempting and keeping it looking \"active\" " +
             "to your serverless provider's own idle-timeout. Raise this if your provider's idle-timeout " +
             "is longer than the default.";
-        const delayInput = field("Post-completion delay (seconds)", "number", "5");
-        const jobsHistoryInput = field("Saved job history size (jobs)", "number", "500");
+        const delayInput = field("Post-completion delay (seconds)", "number");
+        const jobsHistoryInput = field("Saved job history size (jobs)", "number");
         jobsHistoryInput.title =
             "How many finished jobs to remember on this computer (in jobs_history.db), so the Media " +
             "Assets panel still lists them after ComfyUI or the remote restarts. Oldest are dropped first.";
@@ -218,7 +212,7 @@ app.registerExtension({
             "real cost — off by default, and only useful if you don't have a Remote CPU URL configured above. " +
             "Usually unnecessary when \"Auto-download viewed input/output\" is on."
         );
-        const keepaliveIdleInput = field("  View-activity idle timeout (seconds)", "number", "20");
+        const keepaliveIdleInput = field("  View-activity idle timeout (seconds)", "number");
         // The timeout only means something while "Keep GPU warm" is on, so keep it out of sight otherwise.
         const keepaliveIdleWrap = keepaliveIdleInput.parentElement;
         function syncKeepaliveIdleVisibility() {
@@ -311,19 +305,29 @@ app.registerExtension({
             return false;
         }
 
+        // The server's own defaults (DEFAULT_CONFIG in proxy/config.py), sent along with the config,
+        // so none of them is repeated in this file. Empty until the first config arrives.
+        let defaults = {};
+
         function refreshUI(cfg) {
+            defaults = cfg.defaults || defaults;
             toggle.checked = !!cfg.enabled;
             dot.style.background = cfg.enabled ? "#4caf50" : "#888";
-            longWaitMs = cfg.enabled ? (Number(cfg.timeout) || 300) * 1000 + LONG_WAIT_MARGIN_MS : null;
+            longWaitMs = cfg.enabled ? (Number(cfg.timeout) || defaults.timeout) * 1000 + LONG_WAIT_MARGIN_MS : null;
             urlInput.value = cfg.remote_url || "";
             cpuUrlInput.value = cfg.remote_cpu_url || "";
-            timeoutInput.value = cfg.timeout || 300;
-            delayInput.value = cfg.post_completion_delay ?? 5;
-            jobsHistoryInput.value = cfg.jobs_history_max_entries ?? 500;
-            circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? DEFAULT_CIRCUIT_COOLDOWN_S;
+            timeoutInput.value = cfg.timeout || defaults.timeout || "";
+            delayInput.value = cfg.post_completion_delay ?? defaults.post_completion_delay ?? "";
+            jobsHistoryInput.value = cfg.jobs_history_max_entries ?? defaults.jobs_history_max_entries ?? "";
+            circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? defaults.circuit_breaker_cooldown ?? "";
             autoDlInput.checked = !!cfg.auto_download_viewed;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
-            keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? 20;
+            keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? defaults.gpu_keepalive_idle_timeout ?? "";
+            timeoutInput.placeholder = String(defaults.timeout ?? "");
+            delayInput.placeholder = String(defaults.post_completion_delay ?? "");
+            jobsHistoryInput.placeholder = String(defaults.jobs_history_max_entries ?? "");
+            circuitCooldownInput.placeholder = String(defaults.circuit_breaker_cooldown ?? "");
+            keepaliveIdleInput.placeholder = String(defaults.gpu_keepalive_idle_timeout ?? "");
             syncKeepaliveIdleVisibility();
             authInput.placeholder = cfg.auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
             cpuAuthInput.placeholder = cfg.remote_cpu_auth_key_set ? "•••• saved (leave blank to keep)" : "Bearer token";
@@ -403,7 +407,7 @@ app.registerExtension({
             const patch = {
                 remote_url: urlInput.value.trim(),
                 remote_cpu_url: cpuUrlInput.value.trim(),
-                timeout: parseFloat(timeoutInput.value) || 300,
+                timeout: parseFloat(timeoutInput.value) || defaults.timeout,
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_history_max_entries: parseInt(jobsHistoryInput.value, 10),
                 circuit_breaker_cooldown: parseFloat(circuitCooldownInput.value),
@@ -411,10 +415,12 @@ app.registerExtension({
                 gpu_keepalive_enabled: keepaliveInput.checked,
                 gpu_keepalive_idle_timeout: parseFloat(keepaliveIdleInput.value),
             };
-            if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = 5;
-            if (isNaN(patch.jobs_history_max_entries) || patch.jobs_history_max_entries < 1) patch.jobs_history_max_entries = 500;
-            if (isNaN(patch.circuit_breaker_cooldown) || patch.circuit_breaker_cooldown < 1) patch.circuit_breaker_cooldown = DEFAULT_CIRCUIT_COOLDOWN_S;
-            if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = 20;
+            // An empty or invalid field falls back to the server's default (left out of the patch, so the
+            // saved value stays, if the defaults haven't arrived).
+            if (isNaN(patch.post_completion_delay)) patch.post_completion_delay = defaults.post_completion_delay;
+            if (isNaN(patch.jobs_history_max_entries) || patch.jobs_history_max_entries < 1) patch.jobs_history_max_entries = defaults.jobs_history_max_entries;
+            if (isNaN(patch.circuit_breaker_cooldown) || patch.circuit_breaker_cooldown < 1) patch.circuit_breaker_cooldown = defaults.circuit_breaker_cooldown;
+            if (isNaN(patch.gpu_keepalive_idle_timeout) || patch.gpu_keepalive_idle_timeout < 5) patch.gpu_keepalive_idle_timeout = defaults.gpu_keepalive_idle_timeout;
             if (authInput.value.trim()) {
                 patch.auth_key = authInput.value.trim();
             }

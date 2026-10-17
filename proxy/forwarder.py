@@ -70,15 +70,11 @@ def _circuit_breaker_cooldown() -> float:
     # different idle windows, so a one-size-fits-all cooldown may not give
     # a given provider's own idle-timeout enough of a quiet period to
     # actually kick in.
-    default = cfgmod.DEFAULT_CONFIG["circuit_breaker_cooldown"]  # the one place the default lives
-    return max(1.0, float(cfgmod.get("circuit_breaker_cooldown", default) or default))
+    return cfgmod.number("circuit_breaker_cooldown", 1.0)
 
 
 def _circuit_max_failures() -> int:
-    try:
-        return max(0, int(cfgmod.get("circuit_breaker_max_failures", 2)))
-    except (TypeError, ValueError):
-        return 2
+    return int(cfgmod.number("circuit_breaker_max_failures", 0, zero_is_valid=True))  # 0 = never latch
 
 
 def circuit_is_open(use_cpu: bool = False) -> bool:
@@ -224,11 +220,7 @@ def copy_request_headers(request: web.Request, limit_encoding: bool = False, use
 
 
 def get_timeout() -> aiohttp.ClientTimeout:
-    try:
-        t = float(cfgmod.get("timeout") or 120)
-    except (TypeError, ValueError):
-        t = 120.0
-    t = max(5.0, t)
+    t = cfgmod.number("timeout", 5.0)
     # sock_connect capped so a totally dead endpoint fails fast even with a
     # long total timeout meant to cover cold-boot time.
     return aiohttp.ClientTimeout(total=t, sock_connect=min(t, 30))

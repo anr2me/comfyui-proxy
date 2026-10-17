@@ -129,7 +129,7 @@ def _strip_api_prefix(path: str) -> str:
 
 
 def _is_enabled() -> bool:
-    return bool(cfgmod.get("enabled", False)) and bool(cfgmod.get("remote_url"))
+    return bool(cfgmod.get("enabled")) and bool(cfgmod.get("remote_url"))
 
 
 def _remote_known_active() -> bool:
@@ -733,6 +733,11 @@ def _public_config() -> dict:
     cfg["has_models_cache"] = bool(cached_models)
     cfg["models_cache_count"] = len(cached_models)
     cfg["models_refreshing"] = models_cache.is_refreshing()  # a model list fetch is running or queued
+    # The defaults themselves, so the panel never has to repeat them (they live in config.py only).
+    cfg["defaults"] = {
+        k: v for k, v in cfgmod.DEFAULT_CONFIG.items()
+        if k not in ("models_cache", "models_cache_url", "auth_key", "remote_cpu_auth_key")
+    }
     cfg["auth_key_set"] = bool(cfg.get("auth_key"))
     cfg["remote_cpu_auth_key_set"] = bool(cfg.get("remote_cpu_auth_key"))
     cfg.pop("models_cache", None)
