@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     "gpu_keepalive_idle_timeout": 20,  # stop extending after this many
                                         # seconds with no new /view or
                                         # /viewvideo request
-    "circuit_breaker_cooldown": 30,  # seconds to pause automatic /queue and
+    "circuit_breaker_cooldown": 70,  # seconds to pause automatic /queue and
                                       # /api/jobs polling after the remote
                                       # fails to respond, so repeated polling
                                       # doesn't keep it looking "active" to

@@ -61,7 +61,7 @@ Tap the pill, then the label, to open the panel.
   instance looking "busy" forever. If it still doesn't answer the next
   time, the proxy stops checking until you queue a new prompt or use
   **Clear Stuck State**. If your provider takes longer than the default
-  (30s) to actually shut down an idle instance, raise this.
+  (70s) to actually shut down an idle instance, raise this.
 - **Post-completion delay** — after a job finishes, keeps the live progress
   connection open a few extra seconds so the progress bar and the final log
   lines (like "Prompt executed in …") finish arriving before disconnecting.
