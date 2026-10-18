@@ -11,9 +11,10 @@ Routing rules:
     the proxy is enabled — these are the legitimate reasons to wake the
     remote (queuing/checking a job, or preparing input for one).
   - /interrupt, /free, and browsing/history routes (/history*, /view*,
-    /viewvideo*, /api/crystools*) are only forwarded while a job is known to
-    be incomplete or its shadow progress relay is live — they're not worth a
-    cold start on their own (e.g. opening the logs console while idle).
+    /viewvideo*, /api/crystools*, /api/crysmonitor/monitor*) are only
+    forwarded while a job is known to be incomplete or its shadow progress
+    relay is live — they're not worth a cold start on their own (e.g. opening
+    the logs console while idle).
     Older remote job history simply won't show once the relay has closed;
     this is a deliberate cost/idle-wake tradeoff, not a bug.
   - /api/jobs is handled specially (see jobs_cache.py): finished jobs are
@@ -50,7 +51,11 @@ Routing rules:
     replaced with a fake GPU (config.GPU_NAME / GPU_COUNT), so Crystools'
     GPU monitors still appear while the real GPU is remote. PATCH
     /crystools/monitor/GPU/<index> for those fake GPUs is answered with a
-    stub 200 instead of Crystools' "400 Bad Request" for a missing GPU.
+    stub 200 instead of Crystools' "400 Bad Request" for a missing GPU. The
+    same holds for the MonitorOnly fork of Crystools: its routes are
+    /crysmonitor/monitor/..., it changes a GPU's switches with POST instead of
+    PATCH, and its /crysmonitor/folder_name (the name of the local extension
+    folder, for its stylesheet) is never forwarded.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -112,9 +117,12 @@ CPU_ELIGIBLE_PREFIXES = ("/view", "/viewvideo")
 ASSET_PREFIX = "/api/assets"
 LOCAL_ONLY_ASSET_PREFIXES = ("/api/assets/seed", "/api/assets/prune")
 # "/api/crystools" is its own real namespace (not an alias of a plain route).
+# "/api/crysmonitor/monitor" is the same monitor API in the MonitorOnly fork of
+# Crystools. Not "/api/crysmonitor" as a whole: its /api/crysmonitor/folder_name
+# names the LOCAL extension folder (for its stylesheet) and must stay local.
 # "/api/jobs" GET requests are handled separately below (with a local
 # response cache); this prefix only still matters here for any other method.
-EXTRA_CONDITIONAL_PREFIXES = ("/api/jobs", "/api/crystools")
+EXTRA_CONDITIONAL_PREFIXES = ("/api/jobs", "/api/crystools", "/api/crysmonitor/monitor")
 
 
 def _strip_api_prefix(path: str) -> str:
@@ -533,8 +541,12 @@ async def _handle_queue(request: web.Request) -> web.Response:
 # ---------------------------------------------------------------------------
 
 _fake_gpu_logged = False
-_fake_gpu_active = False  # the last GET /monitor/GPU was answered with the fake list
-_FAKE_GPU_PATCH_RE = re.compile(r"^/crystools/monitor/GPU/(\d+)/?$")
+_fake_gpu_active = set()  # which monitor APIs had their last GET /monitor/GPU answered with the fake list
+# Crystools and its MonitorOnly fork ("crysmonitor") have the same monitor API under
+# different names; the fork changes a GPU's switches with POST where Crystools uses PATCH.
+_FAKE_GPU_LIST_RE = re.compile(r"^/(crystools|crysmonitor)/monitor/GPU/?$")
+_FAKE_GPU_PATCH_RE = re.compile(r"^/(crystools|crysmonitor)/monitor/GPU/(\d+)/?$")
+_FAKE_GPU_PATCH_METHOD = {"crystools": "PATCH", "crysmonitor": "POST"}
 
 
 def _fake_gpu_list() -> list:
@@ -546,11 +558,12 @@ def _fake_gpu_list() -> list:
     return [{"index": i, "name": name} for i in range(count)]
 
 
-def _maybe_fake_crystools_gpu(resp: web.StreamResponse) -> web.StreamResponse:
+def _maybe_fake_crystools_gpu(resp: web.StreamResponse, api: str = "crystools") -> web.StreamResponse:
     """Replace an empty/'no GPU' local Crystools GPU list with the fake one.
+    `api` is the monitor API that was asked ("crystools" or "crysmonitor").
     Anything else (a real GPU, an error status, a streamed or unparseable
     response) is returned untouched."""
-    global _fake_gpu_logged, _fake_gpu_active
+    global _fake_gpu_logged
     if not isinstance(resp, web.Response) or resp.status != 200:
         return resp
     raw = resp.body
@@ -561,10 +574,10 @@ def _maybe_fake_crystools_gpu(resp: web.StreamResponse) -> web.StreamResponse:
     except Exception:
         return resp  # non-empty but unparseable: not ours to touch
     if data and not (isinstance(data, list) and not data[0]):
-        _fake_gpu_active = False
+        _fake_gpu_active.discard(api)
         return resp  # a real GPU was detected locally
     fake = _fake_gpu_list()
-    _fake_gpu_active = True
+    _fake_gpu_active.add(api)
     if not _fake_gpu_logged:
         _fake_gpu_logged = True
         logger.info(
@@ -576,12 +589,13 @@ def _maybe_fake_crystools_gpu(resp: web.StreamResponse) -> web.StreamResponse:
 def _stub_fake_gpu_patch(request: web.Request, canonical: str):
     """Crystools' PATCH /monitor/GPU/<index> (per-GPU monitor toggles) answers
     "400 Bad Request" for an index it doesn't have — which is every index
-    while we're faking the GPU. Acknowledge those with a 200 instead (the
-    toggles have nothing to act on anyway). None = not a request we handle."""
-    if request.method != "PATCH" or not _fake_gpu_active:
-        return None
+    while we're faking the GPU (the fork's POST version doesn't even catch the
+    error and answers 500). Acknowledge those with a 200 instead (the toggles
+    have nothing to act on anyway). None = not a request we handle."""
     m = _FAKE_GPU_PATCH_RE.match(canonical)
-    if m is None or int(m.group(1)) >= len(_fake_gpu_list()):
+    if m is None or m.group(1) not in _fake_gpu_active or request.method != _FAKE_GPU_PATCH_METHOD[m.group(1)]:
+        return None
+    if int(m.group(2)) >= len(_fake_gpu_list()):
         return None
     return web.Response(status=200)
 
@@ -681,8 +695,10 @@ async def proxy_middleware(request: web.Request, handler):
             if stub is not None:
                 return stub
         resp = await handler(request)
-        if _is_enabled() and request.method == "GET" and canonical.rstrip("/") == "/crystools/monitor/GPU":
-            resp = _maybe_fake_crystools_gpu(resp)
+        if _is_enabled() and request.method == "GET":
+            m = _FAKE_GPU_LIST_RE.match(canonical)
+            if m is not None:
+                resp = _maybe_fake_crystools_gpu(resp, m.group(1))
         return resp
 
     if canonical == "/prompt" and request.method == "POST":
@@ -698,9 +714,10 @@ async def proxy_middleware(request: web.Request, handler):
         return await forwarder.forward_http(request)
 
     # Everything else (history, view, viewvideo, api/jobs, api/crystools,
-    # uploads, free, ...): stream through untouched, preserving encoding,
-    # partial content, and status codes — to the CPU target when eligible
-    # and the GPU isn't already active, otherwise to the GPU as usual.
+    # api/crysmonitor/monitor, uploads, free, ...): stream through untouched,
+    # preserving encoding, partial content, and status codes — to the CPU
+    # target when eligible and the GPU isn't already active, otherwise to the
+    # GPU as usual.
     use_cpu = _use_cpu_target(canonical, path)
     is_view_route = any(canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES)
     if use_cpu:

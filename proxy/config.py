@@ -17,8 +17,9 @@ CONFIG_PATH = os.path.join(_PACKAGE_DIR, "proxy_config.json")
 # so a fork that changes the database layout keeps its own separate file.
 JOBS_DB_PATH = os.path.join(_PACKAGE_DIR, "jobs_history.db")
 
-# Fake GPU reported to the Crystools monitor when its /monitor/GPU request
-# stays local and this machine has no GPU (see server_hooks.py). Edit here;
+# Fake GPU reported to the Crystools monitor (or its MonitorOnly fork) when its
+# /monitor/GPU request stays local and this machine has no GPU (see
+# server_hooks.py). Edit here;
 # deliberately not a saved setting and not shown in the UI panel.
 GPU_NAME = "L4"   # reported as "NVIDIA L4"
 GPU_COUNT = 1
