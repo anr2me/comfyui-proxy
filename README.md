@@ -148,11 +148,12 @@ Tap the pill, then the label, to open the panel.
   one shared user folder, ComfyUI's lock on the database may not hold across
   them (watch for "database is locked" message).
 - If your computer has no GPU of its own, the Crystools resource monitor
-  (the original, or its MonitorOnly fork) lists a placeholder one (an NVIDIA
-  L4 by default) so its GPU meters still appear; while a job runs it shows the
-  remote GPU's real readings — for that, the remote needs the same monitor
-  installed. To change the placeholder, edit `GPU_NAME` and `GPU_COUNT` near
-  the top of `proxy/config.py`.
+  (the original, or its MonitorOnly fork) and comfyui-resource-monitor list a
+  placeholder one (an NVIDIA L4 with 24 GB by default) so their GPU meters
+  still appear; while a job runs they show the remote GPU's real readings —
+  for that, the remote needs the same monitor installed. To change the
+  placeholder, edit `GPU_NAME`, `GPU_COUNT` and `GPU_VRAM_GB` near the top of
+  `proxy/config.py`.
 
 ## If something seems stuck
 

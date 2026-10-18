@@ -11,10 +11,10 @@ Routing rules:
     the proxy is enabled — these are the legitimate reasons to wake the
     remote (queuing/checking a job, or preparing input for one).
   - /interrupt, /free, and browsing/history routes (/history*, /view*,
-    /viewvideo*, /api/crystools*, /api/crysmonitor/monitor*) are only
-    forwarded while a job is known to be incomplete or its shadow progress
-    relay is live — they're not worth a cold start on their own (e.g. opening
-    the logs console while idle).
+    /viewvideo*, /api/crystools*, /api/crysmonitor/monitor*,
+    /api/resource-monitor*) are only forwarded while a job is known to be
+    incomplete or its shadow progress relay is live — they're not worth a
+    cold start on their own (e.g. opening the logs console while idle).
     Older remote job history simply won't show once the relay has closed;
     this is a deliberate cost/idle-wake tradeoff, not a bug.
   - /api/jobs is handled specially (see jobs_cache.py): finished jobs are
@@ -56,6 +56,13 @@ Routing rules:
     /crysmonitor/monitor/..., it changes a GPU's switches with POST instead of
     PATCH, and its /crysmonitor/folder_name (the name of the local extension
     folder, for its stylesheet) is never forwarded.
+  - comfyui-resource-monitor gets the same fake GPU (config.GPU_NAME /
+    GPU_VRAM_GB). It reports its readings in HTTP answers (GET
+    /resource-monitor/snapshot, and the snapshot in the answer of POST
+    /resource-monitor/configure) and as "resource-monitor.snapshot" websocket
+    events its local service pushes; all of the local ones say there is no GPU,
+    so each gets one added. Those local events are held back while the remote's
+    own are arriving through the shadow stream.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -120,9 +127,13 @@ LOCAL_ONLY_ASSET_PREFIXES = ("/api/assets/seed", "/api/assets/prune")
 # "/api/crysmonitor/monitor" is the same monitor API in the MonitorOnly fork of
 # Crystools. Not "/api/crysmonitor" as a whole: its /api/crysmonitor/folder_name
 # names the LOCAL extension folder (for its stylesheet) and must stay local.
+# "/api/resource-monitor" is comfyui-resource-monitor's API (snapshot, configure,
+# disconnect); its readings otherwise arrive as websocket events, see below.
 # "/api/jobs" GET requests are handled separately below (with a local
 # response cache); this prefix only still matters here for any other method.
-EXTRA_CONDITIONAL_PREFIXES = ("/api/jobs", "/api/crystools", "/api/crysmonitor/monitor")
+EXTRA_CONDITIONAL_PREFIXES = (
+    "/api/jobs", "/api/crystools", "/api/crysmonitor/monitor", "/api/resource-monitor",
+)
 
 
 def _strip_api_prefix(path: str) -> str:
@@ -549,12 +560,16 @@ _FAKE_GPU_PATCH_RE = re.compile(r"^/(crystools|crysmonitor)/monitor/GPU/(\d+)/?$
 _FAKE_GPU_PATCH_METHOD = {"crystools": "PATCH", "crysmonitor": "POST"}
 
 
+def _fake_gpu_name() -> str:
+    return f"NVIDIA {cfgmod.GPU_NAME}"
+
+
 def _fake_gpu_list() -> list:
     try:
         count = max(1, int(cfgmod.GPU_COUNT))
     except (AttributeError, TypeError, ValueError):
         count = 1
-    name = f"NVIDIA {getattr(cfgmod, 'GPU_NAME', 'L4')}"
+    name = _fake_gpu_name()
     return [{"index": i, "name": name} for i in range(count)]
 
 
@@ -598,6 +613,88 @@ def _stub_fake_gpu_patch(request: web.Request, canonical: str):
     if int(m.group(2)) >= len(_fake_gpu_list()):
         return None
     return web.Response(status=200)
+
+
+# ---------------------------------------------------------------------------
+# comfyui-resource-monitor: the same fake GPU, for a monitor that reports in two
+# ways — HTTP answers, and a websocket event its service pushes to every
+# registered browser each refresh interval. The panel merges each reading over
+# the previous one, so all the local ones must carry the fake GPU, or a "no GPU"
+# reading would keep taking it away again.
+# ---------------------------------------------------------------------------
+
+_FAKE_RESOURCE_ROUTES = ("/resource-monitor/snapshot", "/resource-monitor/configure")
+_fake_resource_logged = False
+
+
+def _fake_resource_snapshot(snapshot):
+    """A copy of a resource-monitor reading with the fake GPU in it, if the reading
+    says there is no GPU. Anything else (a real GPU, not a reading) comes back as is."""
+    global _fake_resource_logged
+    if not isinstance(snapshot, dict) or snapshot.get("gpu_available") is not False:
+        return snapshot
+    faked = dict(snapshot)
+    faked.update(
+        gpu_available=True,
+        gpu_name=_fake_gpu_name(),
+        gpu_percent=0.0,
+        vram_percent=0.0,
+        vram_used_bytes=0,
+        vram_total_bytes=int(cfgmod.GPU_VRAM_GB * 1024 ** 3),
+        gpu_temp_celsius=0.0,
+    )
+    if not _fake_resource_logged:
+        _fake_resource_logged = True
+        logger.info(f"[ComfyUI Proxy] No local GPU detected; reporting {_fake_gpu_name()} to comfyui-resource-monitor.")
+    return faked
+
+
+def _maybe_fake_resource_gpu(resp: web.StreamResponse) -> web.StreamResponse:
+    """The local answer of GET /resource-monitor/snapshot (the reading itself) or
+    POST /resource-monitor/configure (with the reading under "snapshot"), with the
+    fake GPU in it when it says there is none."""
+    if not isinstance(resp, web.Response) or resp.status != 200:
+        return resp
+    raw = resp.body
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return resp
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return resp
+    if not isinstance(data, dict):
+        return resp
+    if isinstance(data.get("snapshot"), dict):
+        faked = _fake_resource_snapshot(data["snapshot"])
+        if faked is data["snapshot"]:
+            return resp
+        data = {**data, "snapshot": faked}
+    else:
+        faked = _fake_resource_snapshot(data)
+        if faked is data:
+            return resp
+        data = faked
+    return web.json_response(data)
+
+
+def _hook_resource_monitor_events(server) -> None:
+    """Put the fake GPU into the readings comfyui-resource-monitor pushes to the
+    browser as websocket events (they never pass through the middleware), and hold
+    them back for a client whose remote is sending its own through the shadow
+    stream, which would otherwise alternate with them."""
+    original = server.send
+    if getattr(original, "_comfyui_proxy_hook", False):
+        return
+
+    async def send(event, data, sid=None):
+        if event == relay.RESOURCE_MONITOR_EVENT and _is_enabled():
+            if sid is not None and relay.remote_streams_resource_monitor(sid):
+                return
+            data = _fake_resource_snapshot(data)
+        return await original(event, data, sid)
+
+    send._comfyui_proxy_hook = True
+    server.send = send
 
 
 # ---------------------------------------------------------------------------
@@ -699,6 +796,8 @@ async def proxy_middleware(request: web.Request, handler):
             m = _FAKE_GPU_LIST_RE.match(canonical)
             if m is not None:
                 resp = _maybe_fake_crystools_gpu(resp, m.group(1))
+        if _is_enabled() and canonical in _FAKE_RESOURCE_ROUTES:
+            resp = _maybe_fake_resource_gpu(resp)
         return resp
 
     if canonical == "/prompt" and request.method == "POST":
@@ -767,6 +866,7 @@ def setup():
     server = PromptServer.instance
     if proxy_middleware not in server.app.middlewares:
         server.app.middlewares.append(proxy_middleware)
+    _hook_resource_monitor_events(server)
 
     routes = server.routes
 

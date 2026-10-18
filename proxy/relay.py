@@ -41,6 +41,7 @@ messages and jobs take over once the prompt is queued.
 import asyncio
 import json
 import logging
+import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 
@@ -66,6 +67,13 @@ _closing_tasks = set()  # relay tasks whose socket is already closed and that ar
 _COMPLETION_MSG_TYPES = {"execution_success", "execution_error", "execution_interrupted"}
 
 MAX_DOWNLOAD_KEEP_OPEN = 1800.0  # never hold the connection open longer than this just for file downloads
+
+# comfyui-resource-monitor: the websocket event its service sends readings with, and how
+# recently the remote must have sent one to a client for the local readings to be held
+# back (see remote_streams_resource_monitor()).
+RESOURCE_MONITOR_EVENT = "resource-monitor.snapshot"
+RESOURCE_MONITOR_FRESH_S = 10.0
+_resource_monitor_seen = {}  # client_id -> time.monotonic() when the remote last sent it a reading
 
 WS_CLOSE_TIMEOUT = 10.0  # how long closing the shadow websocket may wait for the remote's close frame
 
@@ -154,6 +162,14 @@ def pending_done(client_id):
 def has_relay_for(client_id) -> bool:
     task = _relay_tasks.get(client_id)
     return task is not None and not task.done()
+
+
+def remote_streams_resource_monitor(client_id) -> bool:
+    """True while the remote is sending this client comfyui-resource-monitor
+    readings through the shadow stream, so the readings of the local monitor can
+    be held back instead of fighting with them."""
+    seen = _resource_monitor_seen.get(client_id)
+    return seen is not None and time.monotonic() - seen < RESOURCE_MONITOR_FRESH_S
 
 
 def _local_clients() -> list:
@@ -413,6 +429,8 @@ async def _run_relay(client_id: str):
 
                     last_queue_remaining = _status_queue_remaining(parsed, last_queue_remaining)
                     files_cache.note_message(parsed)  # remember that a job saved a file to the output folder
+                    if isinstance(parsed, dict) and parsed.get("type") == RESOURCE_MONITOR_EVENT:
+                        _resource_monitor_seen[client_id] = time.monotonic()
 
                     if not got_sid:
                         # This very first message arrives right after connecting,
@@ -573,6 +591,7 @@ async def _run_relay(client_id: str):
             if _owns_slot(client_id, me):
                 _relay_tasks.pop(client_id, None)
                 _ready_events.pop(client_id, None)
+                _resource_monitor_seen.pop(client_id, None)
                 # Whatever jobs were tracked against this client stop being tracked
                 # the moment we can no longer observe them, regardless of why the
                 # relay ended (clean completion, connect timeout, ws error, ...).
