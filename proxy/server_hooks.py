@@ -55,7 +55,10 @@ Routing rules:
     same holds for the MonitorOnly fork of Crystools: its routes are
     /crysmonitor/monitor/..., it changes a GPU's switches with POST instead of
     PATCH, and its /crysmonitor/folder_name (the name of the local extension
-    folder, for its stylesheet) is never forwarded.
+    folder, for its stylesheet) is never forwarded. A local /monitor/HDD or
+    /monitor/GPU request that raises (psutil can't read /proc/filesystems in
+    some sandboxes) is answered with an empty list instead of a 500 and a
+    traceback.
   - comfyui-resource-monitor gets the same fake GPU (config.GPU_NAME /
     GPU_VRAM_GB). It reports its readings in HTTP answers (GET
     /resource-monitor/snapshot, and the snapshot in the answer of POST
@@ -558,6 +561,11 @@ _fake_gpu_active = set()  # which monitor APIs had their last GET /monitor/GPU a
 _FAKE_GPU_LIST_RE = re.compile(r"^/(crystools|crysmonitor)/monitor/GPU/?$")
 _FAKE_GPU_PATCH_RE = re.compile(r"^/(crystools|crysmonitor)/monitor/GPU/(\d+)/?$")
 _FAKE_GPU_PATCH_METHOD = {"crystools": "PATCH", "crysmonitor": "POST"}
+# GET /monitor/HDD and /monitor/GPU list the machine's partitions and GPUs by asking psutil and
+# NVML, which can fail where the machine is locked down (psutil reads /proc/filesystems, which
+# some sandboxes deny): see _monitor_list_failed().
+_MONITOR_LIST_RE = re.compile(r"^/(?:crystools|crysmonitor)/monitor/(?:HDD|GPU)/?$")
+_monitor_failures_logged = set()
 
 
 def _fake_gpu_name() -> str:
@@ -573,12 +581,25 @@ def _fake_gpu_list() -> list:
     return [{"index": i, "name": name} for i in range(count)]
 
 
+def _log_fake_gpu_once() -> None:
+    """Say, once, that the monitors are being shown a fake GPU (Crystools, its
+    MonitorOnly fork and comfyui-resource-monitor all share this message)."""
+    global _fake_gpu_logged
+    if _fake_gpu_logged:
+        return
+    _fake_gpu_logged = True
+    fake = _fake_gpu_list()
+    logger.info(
+        f"[ComfyUI Proxy] No local GPU detected; reporting {len(fake)}x {fake[0]['name']} "
+        "fake GPU to Crystools/Resource Monitor."
+    )
+
+
 def _maybe_fake_crystools_gpu(resp: web.StreamResponse, api: str = "crystools") -> web.StreamResponse:
     """Replace an empty/'no GPU' local Crystools GPU list with the fake one.
     `api` is the monitor API that was asked ("crystools" or "crysmonitor").
     Anything else (a real GPU, an error status, a streamed or unparseable
     response) is returned untouched."""
-    global _fake_gpu_logged
     if not isinstance(resp, web.Response) or resp.status != 200:
         return resp
     raw = resp.body
@@ -593,11 +614,7 @@ def _maybe_fake_crystools_gpu(resp: web.StreamResponse, api: str = "crystools") 
         return resp  # a real GPU was detected locally
     fake = _fake_gpu_list()
     _fake_gpu_active.add(api)
-    if not _fake_gpu_logged:
-        _fake_gpu_logged = True
-        logger.info(
-            f"[ComfyUI Proxy] No local GPU detected; reporting {len(fake)}x {fake[0]['name']} to Crystools."
-        )
+    _log_fake_gpu_once()
     return web.json_response(fake)
 
 
@@ -615,6 +632,27 @@ def _stub_fake_gpu_patch(request: web.Request, canonical: str):
     return web.Response(status=200)
 
 
+def _monitor_list_failed(request: web.Request, canonical: str, error: Exception):
+    """The local Crystools / MonitorOnly fork could not list its partitions or GPUs
+    (GET /monitor/HDD, /monitor/GPU): psutil reading /proc/filesystems is denied in
+    some sandboxes, for one. Left alone that is a 500 with a traceback in the log
+    each time the panel loads, and the fork's panel then never creates the
+    setting that list was for. An empty list is the honest answer — "no
+    partitions", or "no GPU", which then gets the fake GPU. None = not one of
+    those requests (the error is not ours to hide)."""
+    if request.method != "GET" or _MONITOR_LIST_RE.match(canonical) is None:
+        return None
+    route = canonical.rstrip("/")
+    key = (route, type(error).__name__)
+    if key not in _monitor_failures_logged:
+        _monitor_failures_logged.add(key)
+        logger.warning(
+            f"[ComfyUI Proxy] The local {route} request failed ({type(error).__name__}: {error}); "
+            "answering with an empty list instead."
+        )
+    return web.json_response([])
+
+
 # ---------------------------------------------------------------------------
 # comfyui-resource-monitor: the same fake GPU, for a monitor that reports in two
 # ways — HTTP answers, and a websocket event its service pushes to every
@@ -624,13 +662,11 @@ def _stub_fake_gpu_patch(request: web.Request, canonical: str):
 # ---------------------------------------------------------------------------
 
 _FAKE_RESOURCE_ROUTES = ("/resource-monitor/snapshot", "/resource-monitor/configure")
-_fake_resource_logged = False
 
 
 def _fake_resource_snapshot(snapshot):
     """A copy of a resource-monitor reading with the fake GPU in it, if the reading
     says there is no GPU. Anything else (a real GPU, not a reading) comes back as is."""
-    global _fake_resource_logged
     if not isinstance(snapshot, dict) or snapshot.get("gpu_available") is not False:
         return snapshot
     faked = dict(snapshot)
@@ -643,9 +679,7 @@ def _fake_resource_snapshot(snapshot):
         vram_total_bytes=int(cfgmod.GPU_VRAM_GB * 1024 ** 3),
         gpu_temp_celsius=0.0,
     )
-    if not _fake_resource_logged:
-        _fake_resource_logged = True
-        logger.info(f"[ComfyUI Proxy] No local GPU detected; reporting {_fake_gpu_name()} to comfyui-resource-monitor.")
+    _log_fake_gpu_once()
     return faked
 
 
@@ -791,7 +825,14 @@ async def proxy_middleware(request: web.Request, handler):
             stub = _stub_fake_gpu_patch(request, canonical)
             if stub is not None:
                 return stub
-        resp = await handler(request)
+        try:
+            resp = await handler(request)
+        except web.HTTPException:
+            raise  # an intended 404/403/...: not a failure
+        except Exception as e:
+            resp = _monitor_list_failed(request, canonical, e) if _is_enabled() else None
+            if resp is None:
+                raise
         if _is_enabled() and request.method == "GET":
             m = _FAKE_GPU_LIST_RE.match(canonical)
             if m is not None:
