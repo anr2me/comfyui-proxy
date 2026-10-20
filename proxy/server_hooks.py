@@ -733,6 +733,39 @@ def _hook_resource_monitor_events(server) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Logging which endpoint a request went to
+# ---------------------------------------------------------------------------
+
+# A page of thumbnails is dozens of /view requests within a second, and a video
+# player's Range requests come in bursts: one line per route and interval is enough
+# to say that they go to the CPU container.
+CPU_ROUTE_LOG_INTERVAL = 30.0
+_cpu_route_logged = {}  # route -> [monotonic time of its last line, requests since that were not logged]
+
+
+def _log_cpu_route(path: str, saving: bool = False) -> None:
+    """Say that a request goes to the CPU container because the GPU isn't active: once
+    per route per CPU_ROUTE_LOG_INTERVAL, with how many similar requests were left out
+    since the line before. A file that is already fully on this computer never gets here
+    (it is served locally, silently); these are the ones that still have to come from
+    the remote. `saving`: the response is also being saved as a local copy."""
+    route = "/".join(path.split("/")[:3])  # "/api/view", "/api/assets" (not every asset's own URL), "/upload/image"
+    now = time.monotonic()
+    entry = _cpu_route_logged.get(route)
+    if entry is not None and now - entry[0] < CPU_ROUTE_LOG_INTERVAL:
+        entry[1] += 1
+        return
+    skipped = entry[1] if entry else 0
+    _cpu_route_logged[route] = [now, 0]
+    logger.info(
+        f"[ComfyUI Proxy] Using remote CPU container for {path} (GPU not active)"
+        + (", saving a local copy" if saving else "")
+        + (f"; {skipped} similar request(s) not logged since the last line" if skipped else "")
+        + "."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
 
@@ -862,7 +895,7 @@ async def proxy_middleware(request: web.Request, handler):
     use_cpu = _use_cpu_target(canonical, path)
     is_view_route = any(canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES)
     if use_cpu:
-        logger.info(f"[ComfyUI Proxy] Using remote CPU container for {path} (GPU not active).")
+        _log_cpu_route(path, saving=bool(view_local_path))
     else:
         if not relay.has_active_relay():
             asyncio.create_task(forwarder.wake_remote_if_needed(f"request to {path}"))
