@@ -38,6 +38,7 @@ from aiohttp import web
 from . import config as cfgmod
 from . import forwarder
 from . import jobs_db
+from . import logsafe
 from . import placeholders
 
 logger = logging.getLogger("ComfyUIProxy")
@@ -211,12 +212,12 @@ async def _fetch(path: str, query: str):
     except aiohttp.ClientError as e:
         logger.error(f"[ComfyUI Proxy] Failed to fetch {path}: {e}")
         forwarder.circuit_record_failure()
-        return None, web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
+        return None, web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {logsafe.sanitize_logs(e)}"}, status=502)
     except (RuntimeError, LookupError, UnicodeDecodeError) as e:
         # Decode errors aren't a sign the remote is unresponsive — don't
         # trip the breaker for these.
         logger.error(f"[ComfyUI Proxy] Decode error fetching {path}: {e}")
-        return None, web.json_response({"error": f"ComfyUI Proxy: failed to decode remote response: {e}"}, status=502)
+        return None, web.json_response({"error": f"ComfyUI Proxy: failed to decode remote response: {logsafe.sanitize_logs(e)}"}, status=502)
     forwarder.circuit_record_success()
     return result, None
 

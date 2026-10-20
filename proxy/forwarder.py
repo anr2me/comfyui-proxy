@@ -22,6 +22,7 @@ import aiohttp
 from aiohttp import web
 
 from . import config as cfgmod
+from . import logsafe
 
 logger = logging.getLogger("ComfyUIProxy")
 
@@ -366,7 +367,7 @@ async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -
             # and a brand new connection attempt failing outright is not the
             # same transient, worth-retrying situation handled there.
             logger.error(f"[ComfyUI Proxy] Connection error reaching remote {label} for {req_desc}: {e}")
-            return web.json_response({"error": f"ComfyUI Proxy: cannot reach remote {label}: {e}"}, status=502)
+            return web.json_response({"error": f"ComfyUI Proxy: cannot reach remote {label}: {logsafe.sanitize_logs(e)}"}, status=502)
         except _TRANSIENT_CONN_ERRORS as e:
             # Covers things like "Cannot write to closing transport" — a
             # transient aiohttp connection-pool race where the pool hands
@@ -417,7 +418,7 @@ async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -
                     f"[ComfyUI Proxy] Client error forwarding {req_desc} to remote {label} "
                     f"after {max_attempts} attempt(s) ({type(e).__name__}): {e}"
                 )
-            return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
+            return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {logsafe.sanitize_logs(e)}"}, status=502)
         except aiohttp.ClientResponseError as e:
             logger.error(f"[ComfyUI Proxy] Remote {label} responded with error for {req_desc}: {e}")
             return web.json_response({"error": f"ComfyUI Proxy: remote {label} error: {e.message}"}, status=e.status or 502)
@@ -426,7 +427,7 @@ async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -
                 f"[ComfyUI Proxy] Client error forwarding {req_desc} to remote {label} "
                 f"({type(e).__name__}): {e}"
             )
-            return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {e}"}, status=502)
+            return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {logsafe.sanitize_logs(e)}"}, status=502)
         except (UnicodeDecodeError, LookupError) as e:
             logger.error(f"[ComfyUI Proxy] Encoding error while forwarding to remote {label}: {e}")
             return web.json_response({"error": "ComfyUI Proxy: encoding error while forwarding response"}, status=502)

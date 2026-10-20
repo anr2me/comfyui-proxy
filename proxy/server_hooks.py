@@ -91,6 +91,7 @@ from . import files_cache
 from . import forwarder
 from . import jobs_cache
 from . import keepalive
+from . import logsafe
 from . import models_cache
 from . import placeholders
 from . import relay
@@ -331,7 +332,7 @@ async def _read_tracking_response(r: aiohttp.ClientResponse, context: str):
         return None, None, web.json_response(
             {
                 "error": (
-                    f"ComfyUI Proxy: failed to decode the remote's response for {context} ({e}). "
+                    f"ComfyUI Proxy: failed to decode the remote's response for {context} ({logsafe.sanitize_logs(e)}). "
                     "This shouldn't normally happen since the proxy asks for gzip/deflate only on "
                     "this call, but if your gateway ignores Accept-Encoding and forces br/zstd "
                     "anyway, install 'Brotli' and/or 'backports.zstd' (Python < 3.14) in ComfyUI's "
@@ -401,7 +402,7 @@ async def _handle_prompt(request: web.Request) -> web.Response:
     except aiohttp.ClientError as e:
         logger.error(f"[ComfyUI Proxy] Failed to submit prompt: {e}")
         forwarder.circuit_record_failure()
-        return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
+        return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {logsafe.sanitize_logs(e)}"}, status=502)
 
     forwarder.circuit_record_success()
     if data is not None:
@@ -538,7 +539,7 @@ async def _handle_queue(request: web.Request) -> web.Response:
     except aiohttp.ClientError as e:
         logger.error(f"[ComfyUI Proxy] Failed to fetch remote queue: {e}")
         forwarder.circuit_record_failure()
-        return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {e}"}, status=502)
+        return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {logsafe.sanitize_logs(e)}"}, status=502)
 
     forwarder.circuit_record_success()
     if data is not None:
@@ -974,6 +975,7 @@ def setup():
         if "remote_cpu_auth_key" in clean and not clean["remote_cpu_auth_key"]:
             clean.pop("remote_cpu_auth_key", None)  # blank means "leave unchanged"
 
+        logsafe.remember()  # the URLs and keys about to change must stay hidden in later log lines
         prev = cfgmod.load_config()
         url_changed = "remote_url" in clean and clean["remote_url"] != prev.get("remote_url")
         newly_enabled = clean.get("enabled") and not prev.get("enabled")
@@ -1035,6 +1037,7 @@ def setup():
         if placeholders.cancel_all():
             await relay.announce_pending()  # take the waiting jobs out of the UI's queue too
         keepalive.stop()
+        logsafe.remember()  # ...and so must the ones a reset is about to clear
         cfgmod.reset_to_defaults()
         logger.info("[ComfyUI Proxy] Config reset to defaults.")
         return web.json_response(_public_config())
