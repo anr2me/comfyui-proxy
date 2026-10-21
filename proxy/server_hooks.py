@@ -765,6 +765,14 @@ def _log_cpu_route(path: str, saving: bool = False) -> None:
     )
 
 
+def _file_desc(path: str, query) -> str:
+    """What a file request was for, for the log: type/subfolder/filename for /view, else the path."""
+    name = query.get("filename")
+    if not name:
+        return path
+    return "/".join(p for p in (query.get("type"), query.get("subfolder"), name) if p)
+
+
 # ---------------------------------------------------------------------------
 # Middleware
 # ---------------------------------------------------------------------------
@@ -894,6 +902,14 @@ async def proxy_middleware(request: web.Request, handler):
     # GPU as usual.
     use_cpu = _use_cpu_target(canonical, path)
     is_view_route = any(canonical == p or canonical.startswith(p + "/") for p in CPU_ELIGIBLE_PREFIXES)
+    file_key = None
+    if use_cpu and request.method in ("GET", "HEAD") and (is_view_route or _is_asset_route(path)):
+        # A file the CPU container just could not provide (or the container itself not answering):
+        # answer from that failure for a while instead of asking it again — see forwarder.py.
+        file_key = (canonical, request.rel_url.query_string)
+        held = forwarder.file_backoff_response(True, *file_key)
+        if held is not None:
+            return held
     if use_cpu:
         _log_cpu_route(path, saving=bool(view_local_path))
     else:
@@ -906,6 +922,8 @@ async def proxy_middleware(request: web.Request, handler):
             keepalive.note_view_activity()
     sink = viewcache.make_sink(view_local_path, request, use_cpu) if view_local_path else None
     resp = await forwarder.forward_http(request, use_cpu=use_cpu, sink=sink)
+    if file_key is not None:
+        forwarder.note_file_result(True, *file_key, resp.status, _file_desc(path, request.rel_url.query))
     if request.method == "POST" and canonical in ("/upload/image", "/upload/mask") and 200 <= resp.status < 300:
         # An upload is what changes the Imported list: refresh the saved copy now,
         # from the container that took it (it is awake), so opening the tab later

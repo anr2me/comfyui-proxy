@@ -118,6 +118,116 @@ def circuit_reset():
     for st in _circuit_state.values():
         st["failures"] = 0
         st["open_until"] = 0.0
+    _reset_file_backoff()
+
+
+# ---------------------------------------------------------------------------
+# Files the remote could not provide
+# ---------------------------------------------------------------------------
+# A page of thumbnails is dozens of requests, and scrolling asks for the same ones
+# again and again. When the remote can't provide them (no credits left to start a
+# container, a container that won't come up, a file that is gone), sending every one
+# of those requests anew only wakes or waits on it for nothing. So after a failure the
+# same request is answered from that failure for a while: the cooldown above, doubling
+# each time it fails again, up to FILE_BACKOFF_MAX. And when the remote itself is not
+# answering (UNAVAILABLE_STATUSES; a connection error or a timeout arrives as one of
+# them) no file is asked for in that time. Unlike the breaker above, this recovers by
+# itself: the first request after the delay goes through, and a success clears it.
+FILE_BACKOFF_MAX = 600.0
+FILE_BACKOFF_KEEP = 500             # failed requests remembered at most
+FILE_FAILURE_LOG_INTERVAL = 30.0
+UNAVAILABLE_STATUSES = (429, 502, 503, 504)  # the remote isn't answering (a missing file is a 404, not this)
+_NOT_A_VERDICT = (416, 499)         # a Range the file can't satisfy; the browser gave up: nothing learned
+
+_file_failures = {}        # (use_cpu, route, query string) -> {"until", "count", "status", "held"}
+_target_down = {}          # use_cpu -> the same, for the whole target
+_file_failure_logged = {}  # (use_cpu, status) -> [monotonic time of its last line, failures since]
+
+
+def _reset_file_backoff() -> None:
+    _file_failures.clear()
+    _target_down.clear()
+    _file_failure_logged.clear()
+
+
+def _file_backoff_delay(count: int) -> float:
+    base = _circuit_breaker_cooldown()
+    return min(base * 2 ** (count - 1), max(base, FILE_BACKOFF_MAX))
+
+
+def file_backoff_response(use_cpu: bool, route: str, query_string: str):
+    """The answer to give instead of asking the remote again, if this very request,
+    or the whole target, failed recently. None: let it go ahead."""
+    now = time.monotonic()
+    for entry in (_target_down.get(use_cpu), _file_failures.get((use_cpu, route, query_string))):
+        if entry is not None and entry["until"] > now:
+            entry["held"] += 1
+            remaining = entry["until"] - now
+            return web.json_response(
+                {"error": (
+                    f"ComfyUI Proxy: the remote {'CPU' if use_cpu else 'GPU'} could not provide this a moment ago; "
+                    f"not asking again for {remaining:.0f}s"
+                )},
+                status=entry["status"],
+                headers={"Retry-After": str(int(remaining) + 1)},
+            )
+    return None
+
+
+def _log_file_failure(use_cpu: bool, status: int, text: str) -> None:
+    """One warning per target and status per FILE_FAILURE_LOG_INTERVAL; the others are counted."""
+    now = time.monotonic()
+    entry = _file_failure_logged.get((use_cpu, status))
+    if entry is not None and now - entry[0] < FILE_FAILURE_LOG_INTERVAL:
+        entry[1] += 1
+        return
+    skipped = entry[1] if entry else 0
+    _file_failure_logged[(use_cpu, status)] = [now, 0]
+    logger.warning(
+        f"[ComfyUI Proxy] {text}" + (f" ({skipped} more not logged since the last line)" if skipped else "") + "."
+    )
+
+
+def note_file_result(use_cpu: bool, route: str, query_string: str, status: int, what: str) -> None:
+    """Record how asking the remote for a file went. `what` names the file in the log."""
+    if status in _NOT_A_VERDICT:
+        return
+    label = "CPU" if use_cpu else "GPU"
+    key = (use_cpu, route, query_string)
+    now = time.monotonic()
+    if status < 400:
+        _file_failures.pop(key, None)
+        if _target_down.pop(use_cpu, None) is not None:
+            logger.info(f"[ComfyUI Proxy] Remote {label} provided a file again; asking it for files as usual.")
+        return
+    if status in UNAVAILABLE_STATUSES:
+        down = _target_down.get(use_cpu)
+        if down is None or down["until"] <= now:  # a failure that was already being waited out is not a new one
+            count = (down["count"] if down else 0) + 1
+            delay = _file_backoff_delay(count)
+            _target_down[use_cpu] = {"until": now + delay, "count": count, "status": status, "held": 0}
+            _log_file_failure(
+                use_cpu, status,
+                f"Remote {label} is not answering file requests (HTTP {status}, for {what}); "
+                f"not asking it for files for {delay:g}s",
+            )
+        return
+    entry = _file_failures.get(key)
+    if entry is None or entry["until"] <= now:
+        count = (entry["count"] if entry else 0) + 1
+        held = entry["held"] if entry else 0
+        delay = _file_backoff_delay(count)
+        _file_failures[key] = {"until": now + delay, "count": count, "status": status, "held": 0}
+        _log_file_failure(
+            use_cpu, status,
+            f"The remote {label} could not provide {what} (HTTP {status}); not asking again for it for {delay:g}s"
+            + (f" ({held} repeated request(s) were answered without asking)" if held else ""),
+        )
+        if len(_file_failures) > FILE_BACKOFF_KEEP:
+            for k in [k for k, e in _file_failures.items() if e["until"] <= now]:
+                del _file_failures[k]
+            while len(_file_failures) > FILE_BACKOFF_KEEP:
+                del _file_failures[min(_file_failures, key=lambda k: _file_failures[k]["until"])]
 
 
 _safe_accept_encoding = None

@@ -61,7 +61,12 @@ Tap the pill, then the label, to open the panel.
   instance looking "busy" forever. If it still doesn't answer the next
   time, the proxy stops checking until you queue a new prompt or use
   **Clear Stuck State**. If your provider takes longer than the default
-  (70s) to actually shut down an idle instance, raise this.
+  (70s) to actually shut down an idle instance, raise this. It's also how
+  long a thumbnail or file the remote couldn't provide (no credits left, a
+  container that won't start, a deleted file) is left alone before the proxy
+  asks for it again — doubling each time it fails again, up to 10 minutes —
+  so scrolling through broken thumbnails doesn't keep hitting the remote.
+  **Clear Stuck State** makes it try again at once.
 - **Post-completion delay** — after a job finishes, keeps the live progress
   connection open a few extra seconds so the progress bar and the final log
   lines (like "Prompt executed in …") finish arriving before disconnecting.
