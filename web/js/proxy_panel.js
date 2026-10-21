@@ -504,6 +504,7 @@ app.registerExtension({
         // never fire there).
         let dragging = false;
         let moved = false;
+        let captureEl = null;
         let startX, startY, origX, origY;
         const DRAG_THRESHOLD = 4; // px, so a tap still reaches the toggle/label
 
@@ -511,7 +512,8 @@ app.registerExtension({
             if (e.target === toggle) return;
             dragging = true;
             moved = false;
-            pill.setPointerCapture(e.pointerId);
+            captureEl = e.target instanceof Element ? e.target : pill;
+            captureEl.setPointerCapture(e.pointerId);
             pill.style.cursor = "grabbing";
             startX = e.clientX;
             startY = e.clientY;
@@ -540,10 +542,11 @@ app.registerExtension({
             dragging = false;
             pill.style.cursor = "grab";
             try {
-                pill.releasePointerCapture(e.pointerId);
+                (captureEl || pill).releasePointerCapture(e.pointerId);
             } catch (err) {
                 /* ignore */
             }
+            captureEl = null;
             const rect = root.getBoundingClientRect();
             savePos({ x: rect.left, y: rect.top });
             // Swallow the click that follows a real drag so it doesn't
