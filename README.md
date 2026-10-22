@@ -160,10 +160,9 @@ Tap the pill, then the label, to open the panel.
   placeholder, edit `GPU_NAME`, `GPU_COUNT` and `GPU_VRAM_GB` near the top of
   `proxy/config.py`.
 - The proxy's own log lines, and the error messages it shows in the UI,
-  replace the host of your remote URLs and your auth keys with placeholders
-  such as `<RemoteGPU_Host>` and `<RemoteGPU_AuthKey>`, so they can be pasted
-  into a bug report. Skim them anyway: lines from ComfyUI or other extensions
-  aren't covered.
+  replace sensitive information such as the host of your remote URLs and your auth keys with placeholders
+  such as `<RemoteGPU_Host>` and `<RemoteGPU_AuthKey>`, so they can be safely pasted into a bug report.  
+  Skim them anyway: lines from ComfyUI or other extensions aren't covered.
 
 ## If something seems stuck
 
