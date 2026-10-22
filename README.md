@@ -83,7 +83,7 @@ Tap the pill, then the label, to open the panel.
   wakes the remote just to redraw thumbnails. Big files finish downloading
   in the background and pick up where they left off if interrupted (you may
   briefly see `.tmp` / `.map` files next to them), and the connection to the
-  GPU stays open until they're done. ComfyUI is also asked to add the new
+  GPU/CPU instance stays open until they're done. ComfyUI is also asked to add the new
   files to your local Assets list. If a local file with the same name
   already exists, it's used as-is.
 - **Keep GPU warm for video/image viewing** *(off by default)* — only
