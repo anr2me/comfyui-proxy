@@ -13,3 +13,5 @@ remote_files.db.*.bak*
 # Their earlier JSON format (imported into the database, then removed)
 remote_files_cache.json
 remote_files_cache.json.tmp
+# Published zip fil
+node.zip
