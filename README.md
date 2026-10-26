@@ -163,6 +163,11 @@ Tap the pill, then the label, to open the panel.
   replace sensitive information such as the host of your remote URLs and your auth keys with placeholders
   such as `<RemoteGPU_Host>` and `<RemoteGPU_AuthKey>`, so they can be safely pasted into a bug report.  
   Skim them anyway: lines from ComfyUI or other extensions aren't covered.
+- Before sending a prompt, the proxy checks that the remote really is a running
+  ComfyUI. If the address answers but isn't (HTTP 404 from a stopped app or a
+  usage limit or credits used up at your provider; 401/403 for a wrong Auth
+  Key), the **Run** button says so instead of failing with an unexplained
+  error, and nothing is sent to the remote.
 
 ## If something seems stuck
 

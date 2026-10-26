@@ -362,5 +362,8 @@ async def refresh_known(reason: str = ""):
     if err is not None:
         logger.warning(f"[ComfyUI Proxy] Pre-fetch of {PATH} ({reason}) failed.")
         return
+    if result[0] != 200:
+        logger.warning(f"[ComfyUI Proxy] The remote answered HTTP {result[0]} for the job history ({reason}); the saved history was not updated.")
+        return
     saved = await asyncio.to_thread(jobs_db.count, _remote_key())
     logger.info(f"[ComfyUI Proxy] Saved job history updated ({saved} job(s) saved for this remote, {reason}).")

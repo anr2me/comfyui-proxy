@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import logging
 import time
+from collections import namedtuple
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -340,6 +341,11 @@ def get_timeout() -> aiohttp.ClientTimeout:
 _wake_lock = asyncio.Lock()
 _in_flight_wake = {False: None, True: None}  # keyed by use_cpu -> shared asyncio.Task
 
+# What the readiness ping found out: the HTTP status it got (None if there was no answer), and
+# `problem` — set when the endpoint answers but is not a ComfyUI we can use — as a sentence for
+# the log and the UI.
+WakeResult = namedtuple("WakeResult", ["status", "problem"])
+
 
 async def wake_remote_if_needed(reason: str = "", use_cpu: bool = False):
     """Ping the target once to trigger a cold boot, logging progress locally
@@ -348,10 +354,11 @@ async def wake_remote_if_needed(reason: str = "", use_cpu: bool = False):
     panel opens) share a single underlying ping instead of each firing their
     own — otherwise the same near-instant wake gets logged and pinged twice
     for what is really one event. GPU and CPU targets are coalesced
-    independently, since they're separate containers."""
+    independently, since they're separate containers. Returns the WakeResult (None
+    when there was nothing to ping, or it took too long)."""
     base = target_base(use_cpu)
     if not base:
-        return
+        return None
 
     async with _wake_lock:
         existing = _in_flight_wake[use_cpu]
@@ -369,9 +376,10 @@ async def wake_remote_if_needed(reason: str = "", use_cpu: bool = False):
     # own timeout/cleanup intact) even if THIS caller gives up waiting.
     ceiling = get_timeout().total + 30
     try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=ceiling)
+        return await asyncio.wait_for(asyncio.shield(task), timeout=ceiling)
     except asyncio.TimeoutError:
         logger.warning(f"[ComfyUI Proxy] Wake check for remote {'CPU' if use_cpu else 'GPU'} exceeded {ceiling:g}s; continuing without waiting further.")
+        return None
 
 
 async def _do_wake_ping(base: str, reason: str, use_cpu: bool = False):
@@ -385,10 +393,23 @@ async def _do_wake_ping(base: str, reason: str, use_cpu: bool = False):
         if auth_key:
             headers["Authorization"] = f"Bearer {auth_key}"
         async with session.get(f"{base}/system_stats", headers=headers, timeout=timeout) as resp:
-            if resp.status < 500:
-                logger.info(f"[ComfyUI Proxy] Remote {label} is ready.")
-            else:
-                logger.warning(f"[ComfyUI Proxy] Remote {label} returned HTTP {resp.status} while waking up.")
+            status = resp.status
+        if status < 400:
+            logger.info(f"[ComfyUI Proxy] Remote {label} is ready.")
+            return WakeResult(status, None)
+        if status >= 500:
+            logger.warning(f"[ComfyUI Proxy] Remote {label} returned HTTP {status} while waking up.")
+            return WakeResult(status, None)
+        # A 4xx: the endpoint answers, but a running ComfyUI always answers /system_stats with 200.
+        if status in (401, 403):
+            problem = f"the remote {label} rejected the request (HTTP {status}); check the Remote {label} Auth Key"
+        else:
+            problem = (
+                f"the remote {label} answered HTTP {status} to /system_stats instead of ComfyUI, so nothing is "
+                "serving ComfyUI there (a stopped app, or a usage limit or credits used up at your provider?)"
+            )
+        logger.warning(f"[ComfyUI Proxy] {problem}.")
+        return WakeResult(status, problem)
     except asyncio.TimeoutError:
         logger.warning(
             f"[ComfyUI Proxy] Timed out waking up remote {label} "
@@ -398,6 +419,7 @@ async def _do_wake_ping(base: str, reason: str, use_cpu: bool = False):
         logger.warning(f"[ComfyUI Proxy] Error waking up remote {label}: {e}")
     except Exception as e:
         logger.warning(f"[ComfyUI Proxy] Unexpected error waking up remote {label}: {e}")
+    return WakeResult(None, None)
 
 
 async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -> web.StreamResponse:

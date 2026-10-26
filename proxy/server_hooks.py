@@ -440,18 +440,24 @@ async def _submit_prompt(request: web.Request, path: str) -> web.Response:
 
     relay.pending_add(client_id)
     ph = None
+    wake = None
     try:
         if not relay.has_active_relay():
             ph = placeholders.add(client_id, workflow_id)
             await relay.announce_waiting(client_id, ph.id)
             await relay.announce_pending()
-            await forwarder.wake_remote_if_needed(f"request to {path}")
+            wake = await forwarder.wake_remote_if_needed(f"request to {path}")
         if ph is not None and ph.cancelled:
             # Cancelled in the Job Queue while the GPU was starting: nothing was
             # sent, and there is no job to report — an empty prompt_id is
             # answered without an error, so the UI just carries on.
             logger.info("[ComfyUI Proxy] Prompt cancelled while the remote GPU was starting; not submitting it.")
             resp = web.json_response({"prompt_id": "", "number": 0, "node_errors": {}})
+        elif wake is not None and wake.problem:
+            # The endpoint answers, but not as a ComfyUI we can use (401/403, or a 404 from a stopped
+            # app / a used-up usage limit): opening the progress stream and sending the prompt would
+            # only meet the same thing. Say so, here and in the UI.
+            resp = web.json_response({"error": f"ComfyUI Proxy: {wake.problem}"}, status=503)
         else:
             resp = await _handle_prompt(request)
     finally:
