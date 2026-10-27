@@ -83,12 +83,17 @@ def local_path_for(query):
         filename = os.path.basename(filename)  # same as ComfyUI's own /view
         base = os.path.abspath(getter())
         subfolder = query.get("subfolder", "") or ""
-        full_dir = os.path.abspath(os.path.join(base, subfolder))
-        path = os.path.abspath(os.path.join(full_dir, filename))
-        common = os.path.commonpath((path, base))
-    except (ValueError, OSError):  # e.g. different drives on Windows, NUL bytes
+        path = os.path.abspath(os.path.join(base, subfolder, filename))
+    except (ValueError, OSError):  # e.g. NUL bytes
         return None
-    if os.path.normcase(common) != os.path.normcase(base) or os.path.normcase(path) == os.path.normcase(base):
+    # Accept only a path strictly inside `base`: normalized above (so any ".."
+    # or absolute `subfolder` is already resolved), then compared with a plain
+    # startswith() against `base` plus a trailing separator. That also rejects
+    # `base` itself, and a sibling like "<base>-other". This is the form code
+    # scanning (CodeQL's py/path-injection) recognizes as a safe check; on
+    # Windows an escape that comes back with different letter case is refused
+    # too, which is the safe direction.
+    if not path.startswith(os.path.join(base, "")):
         return None
     return path
 
