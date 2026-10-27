@@ -15,7 +15,9 @@ off, and expands into a settings panel.
 
 ## Install
 
-Clone this repository into `ComfyUI/custom_nodes/` directory and restart ComfyUI. 
+Install `comfyui-proxy` via ComfyUI-Manager.
+
+Or alternatively, clone this repository into `ComfyUI/custom_nodes/` directory and restart ComfyUI. 
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/anr2me/comfyui-proxy.git
