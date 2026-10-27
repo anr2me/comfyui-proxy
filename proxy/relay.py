@@ -29,6 +29,10 @@ Flow, per the intended sequence:
      a configurable delay (default 5s) before unsubscribing logs and closing
      the shadow connection, so in-flight progress/log animations (and the
      final "Prompt executed in ..." log line) still reach the UI.
+  5. If the stream ends while jobs are still queued/running (the remote was
+     preempted, scaled down or crashed), those jobs are lost: it is logged as
+     an error, the client's tracked jobs are dropped, and announce_interrupted()
+     shows the user an error dialog and resets the queue count in the UI.
 
 Before step 1 can even happen (the remote may still be cold-booting), each
 waiting /prompt submission is shown in the UI's Job Queue as a placeholder job
@@ -201,6 +205,7 @@ async def announce_pending(client_id=None):
 
 
 WAITING_TEXT = "Waiting for a machine — the remote GPU is starting up"
+INTERRUPTED_ERROR_TYPE = "RemoteGPUInterrupted"  # the exception type the error dialog shows
 
 
 async def announce_waiting(client_id, job_id):
@@ -209,6 +214,49 @@ async def announce_waiting(client_id, job_id):
     that job being initialized (the state it shows on ComfyUI Cloud), and
     clears the mark by itself once the job is no longer in its job list."""
     await _send_to_browsers({"type": "notification", "data": {"value": WAITING_TEXT, "id": job_id}}, client_id)
+
+
+async def announce_interrupted(client_id, prompt_ids, lost: int):
+    """Tell the browser that the remote GPU went away while it still had jobs
+    queued for this client (preempted / scaled down / crashed mid-job), so
+    nobody needs the console open to find out.
+
+    Two local websocket messages, both of kinds ComfyUI itself sends:
+      - "execution_error": what the frontend turns into its error dialog when
+        a job fails (same fields as a real one; there is no node to point at,
+        so node_id/node_type stay empty). One message covers every lost job —
+        `lost` is only used in the text — so a big queue doesn't stack up
+        dialogs. It carries the first lost prompt_id, if any is known.
+      - "status": the new queue size. The caller has already dropped this
+        client's tracking, so what is left is placeholders + other clients'
+        jobs — which resets the count the UI shows (the frontend also
+        re-fetches its job list on it) instead of leaving the lost jobs
+        looking queued.
+    """
+    jobs = f"{lost} queued job{'' if lost == 1 else 's'}" if lost > 0 else "its queued jobs"
+    message = (
+        f"The remote GPU was interrupted (preempted or scaled down) and {jobs} "
+        "did not finish. The queue was reset: run the workflow again to restart."
+    )
+    await _send_to_browsers(
+        {
+            "type": "execution_error",
+            "data": {
+                "prompt_id": next(iter(sorted(prompt_ids)), ""),
+                "node_id": "",
+                "node_type": "",
+                "executed": [],
+                "exception_type": INTERRUPTED_ERROR_TYPE,
+                "exception_message": message,
+                "traceback": [],
+                "current_inputs": {},
+                "current_outputs": {},
+                "timestamp": int(time.time() * 1000),  # ms, like ComfyUI's own
+            },
+        },
+        client_id,
+    )
+    await announce_pending(client_id)
 
 
 def _keep_pending_count(client_id, parsed, msg):
@@ -556,12 +604,25 @@ async def _run_relay(client_id: str):
             # likely went away mid-job (interrupted / preempted / scaled to
             # zero). A manual reset (cancelled) is not an interruption.
             if not cancelled and (tracked_jobs > 0 or (last_queue_remaining > 0 and not finished_clean)):
-                logger.warning(
+                lost = max(tracked_jobs, last_queue_remaining)
+                logger.error(
                     f"[ComfyUI Proxy] Remote GPU got interrupted while having "
-                    f"{max(tracked_jobs, last_queue_remaining)} queued job(s) for client {client_id} "
+                    f"{lost} queued job(s) for client {client_id} "
                     f"(last reported queue_remaining={last_queue_remaining}, tracked jobs={tracked_jobs}); "
                     "the remote may have been preempted or scaled down mid-job."
                 )
+                # Those jobs died with the remote, so they no longer count as
+                # queued: stop tracking them (this is also what makes the
+                # queue size announced below come out right) and show the user
+                # an error dialog like a failed job's, so they find out even
+                # without the log console open. If a newer relay has taken over
+                # this client, the tracked jobs now include that relay's own
+                # (live) ones and can't be told apart from the lost ones — so
+                # leave them, and the UI, alone.
+                if _owns_slot(client_id, me):
+                    lost_ids = state.incomplete_ids_for_client(client_id)
+                    state.clear_client(client_id)
+                    await announce_interrupted(client_id, lost_ids, lost)
             if _owns_slot(client_id, me):
                 _signal_ready(client_id)  # never leave a waiting /prompt hanging on failure
             # Guaranteed final refresh attempt, regardless of how the loop above

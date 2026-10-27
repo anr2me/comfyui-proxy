@@ -184,4 +184,4 @@ The ComfyUI console log explains what the proxy is doing as it happens —
 when it's waking the remote, which endpoint a request went to, and why, so
 if something looks off that's the first place to check. For example:  
 - If you saw HTTP status 5XX in the logs, it means something wrong happened on server side (ie. Comfy server might be crashed or not ready yet).  
-- If the log says **Remote GPU got interrupted while having N queued job(s)**, the remote went away mid-job (preempted or scaled down) and those jobs didn't finish.  
+- If the remote GPU is preempted or scaled down mid-job, an error dialog (like a failed job's) tells you the queued jobs were lost, the queue count goes back to 0, and the console logs an error: **Remote GPU got interrupted while having N queued job(s)**. Just press **Run** again.  
