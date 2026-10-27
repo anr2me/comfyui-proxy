@@ -69,6 +69,16 @@ def incomplete_count_for_client(client_id):
         )
 
 
+def incomplete_ids_for_client(client_id):
+    """The prompt_ids of this client's jobs still tracked as incomplete."""
+    with _lock:
+        return {
+            pid
+            for pid, cid in _prompt_client.items()
+            if cid == client_id and pid in _incomplete_prompt_ids
+        }
+
+
 def mark_all_done_for_client(client_id):
     """Force-clear every prompt tracked for this client, regardless of
     whether we ever saw an explicit completion message for it. Used as a
