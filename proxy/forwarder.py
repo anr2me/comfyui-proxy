@@ -553,7 +553,14 @@ async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -
             return web.json_response({"error": f"ComfyUI Proxy: error forwarding request: {logsafe.sanitize_logs(e)}"}, status=502)
         except aiohttp.ClientResponseError as e:
             logger.error(f"[ComfyUI Proxy] Remote {label} responded with error for {req_desc}: {e}")
-            return web.json_response({"error": f"ComfyUI Proxy: remote {label} error: {e.message}"}, status=e.status or 502)
+            # Sanitize the remote's own message before it goes to the UI: it is
+            # server-controlled text (the reason phrase, and sometimes the
+            # body) and can name the host it came from — which is exactly what
+            # a screenshot of an error dialog would then show.
+            return web.json_response(
+                {"error": f"ComfyUI Proxy: remote {label} error: {logsafe.sanitize_logs(e.message)}"},
+                status=e.status or 502,
+            )
         except aiohttp.ClientError as e:
             logger.error(
                 f"[ComfyUI Proxy] Client error forwarding {req_desc} to remote {label} "
