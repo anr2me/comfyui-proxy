@@ -516,10 +516,12 @@ async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -
             # aiohttp raises this same message when the *browser's* socket is
             # the one that's closing (it navigated away / cancelled the
             # request). Retrying then would only hit — and possibly wake —
-            # the remote for nobody, so bail out quietly instead.
+            # the remote for nobody, so bail out quietly instead (debug level:
+            # this is routine, e.g. a video player dropping a Range request
+            # when you seek or scroll away).
             transport = request.transport
             if transport is None or transport.is_closing():
-                logger.warning(
+                logger.debug(
                     f"[ComfyUI Proxy] Browser closed the connection while forwarding {req_desc} "
                     f"to remote {label} ({type(e).__name__}); abandoning request."
                 )
