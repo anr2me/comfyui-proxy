@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-proxy"
 description = "ComfyUI redirection proxy: Forward ComfyUI job/workflow execution to a remote/cloud/serverless GPU endpoint, while workflow editing stays fully local."
-version = "1.0.2"
+version = "1.0.3"
 readme = "README.md"
 license = { file = "LICENSE" }
 dependencies  = [
