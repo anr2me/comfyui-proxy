@@ -38,6 +38,10 @@ Flow, per the intended sequence:
      websocket message will ever end the stream: ComfyUI reports such
      validation errors only in the HTTP answer. release_if_idle() then closes
      the stream, unless this client still has other jobs on the remote.
+  7. A watchdog (_idle_watchdog) covers every other way a stream can get stuck
+     with no job on it: if this client has had no job on the remote for
+     config.IDLE_STREAM_TIMEOUT seconds, the stream is closed the same way, so a
+     serverless GPU is not kept awake for nothing.
 
 Before step 1 can even happen (the remote may still be cold-booting), each
 waiting /prompt submission is shown in the UI's Job Queue as a placeholder job
@@ -88,6 +92,7 @@ RESOURCE_MONITOR_FRESH_S = 10.0
 _resource_monitor_seen = {}  # client_id -> time.monotonic() when the remote last sent it a reading
 
 WS_CLOSE_TIMEOUT = 10.0  # how long closing the shadow websocket may wait for the remote's close frame
+IDLE_CHECK_INTERVAL = 5.0  # how often _idle_watchdog() looks at its stream
 
 
 def _ws_target_url(base: str, path: str, query: str) -> str:
@@ -334,6 +339,36 @@ def release_if_idle(client_id, reason: str) -> bool:
     return True
 
 
+async def _idle_watchdog(client_id: str, me):
+    """Close this relay's stream when it has been idle for too long: no
+    submission in flight and no job tracked for this client for
+    config.IDLE_STREAM_TIMEOUT seconds (0 turns this off). A job that is still
+    tracked is never touched here — the "status"/completion handling in
+    _run_relay() ends those — and a relay that is already closing by itself
+    (the post-completion delay or the keep-alive extension) is left alone."""
+    idle_since = time.monotonic()
+    while True:
+        await asyncio.sleep(IDLE_CHECK_INTERVAL)
+        if _relay_tasks.get(client_id) is not me or me in _closing_tasks:
+            return  # replaced by a newer relay, or already shutting down
+        try:
+            limit = float(cfgmod.IDLE_STREAM_TIMEOUT)
+        except (AttributeError, TypeError, ValueError):
+            limit = 0.0
+        busy = (
+            pending_count(client_id) > 0
+            or state.has_incomplete_job_for_client(client_id)
+            or me in _draining_tasks
+        )
+        if busy or limit <= 0:
+            idle_since = time.monotonic()
+            continue
+        idle = time.monotonic() - idle_since
+        if idle >= limit:
+            release_if_idle(client_id, f"No job on the remote GPU for {idle:.0f}s")
+            return
+
+
 async def _subscribe_logs(base: str, headers: dict, timeout, client_id: str, enabled: bool):
     session = forwarder.get_tracking_session()
     try:
@@ -503,11 +538,13 @@ async def _run_relay(client_id: str):
     finished_clean = False     # saw "no jobs left" for this client (and nothing was queued since)
     cancelled = False          # ended by cancel_all_relays() (manual reset), not by the remote
     ws_remote = None           # the shadow websocket, once connected
+    watchdog = None            # _idle_watchdog() task for this stream
 
     logger.info(f"[ComfyUI Proxy] Connecting remote GPU progress stream for client {client_id}... [relay {rid}]")
     try:
         async with session.ws_connect(target, headers=headers, timeout=_ws_timeout(), heartbeat=30) as ws_remote:
             _remote_sockets[client_id] = ws_remote  # lets release_if_idle() close it from outside
+            watchdog = asyncio.ensure_future(_idle_watchdog(client_id, me))
             got_sid = False
 
             async for msg in ws_remote:
@@ -640,6 +677,8 @@ async def _run_relay(client_id: str):
         # the awaits below are in flight, and snapshot the job state now,
         # before anything else can change it.
         _closing_tasks.add(me)
+        if watchdog is not None:
+            watchdog.cancel()
         tracked_jobs = state.incomplete_count_for_client(client_id)
         released = me in _released_tasks  # closed by release_if_idle(): not an interruption
         try:

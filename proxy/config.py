@@ -31,6 +31,12 @@ GPU_VRAM_GB = 24  # the total VRAM comfyui-resource-monitor shows for it (an L4 
 # after the Timeout setting plus this many seconds. Edit here; not shown in the UI.
 QUEUE_PLACEHOLDER_MARGIN = 60
 
+# The live progress stream to the remote (see relay.py) is closed when this client has
+# had no job on the remote for this many seconds, so a stream that nothing will ever end
+# (a refused or lost prompt, for example) cannot keep a serverless GPU awake. 0 turns
+# this off. Edit here; not shown in the UI.
+IDLE_STREAM_TIMEOUT = 60
+
 DEFAULT_CONFIG = {
     "enabled": False,          # forwarder is OFF by default
     "remote_url": "",          # the GPU endpoint, e.g. https://my-endpoint.runpod.net
