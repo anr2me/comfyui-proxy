@@ -465,6 +465,13 @@ async def _submit_prompt(request: web.Request, path: str) -> web.Response:
         if ph is not None:
             placeholders.remove(ph.id)
 
+    if not 200 <= resp.status < 300:
+        # Nothing was queued (e.g. HTTP 400: a node has a value that is not in
+        # its list). ComfyUI reports that only in this HTTP answer and sends no
+        # websocket message, so the progress stream opened for this submission
+        # would stay open forever: close it, unless this client has other jobs.
+        relay.release_if_idle(client_id, f"Remote GPU did not queue the prompt (HTTP {resp.status})")
+
     if 200 <= resp.status < 300 and models_cache.needs_refresh():
         # The GPU is up now (its job is queued), so this is the free moment to
         # fetch the remote model list we deliberately didn't wake it for earlier.
