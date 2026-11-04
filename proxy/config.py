@@ -62,12 +62,13 @@ DEFAULT_CONFIG = {
                                         # while the proxy watches: old jobs are never
                                         # downloaded, unlike auto_download_viewed. On by
                                         # default; the panel can turn it off.
-    "auto_download_viewed": True,  # save files viewed via /view (type=output/
+    "auto_download_viewed": False,  # save files viewed via /view (type=output/
                                     # input) into the local output/input folder
                                     # and serve them from there afterwards (see
                                     # viewcache.py), so re-rendering thumbnails
-                                    # doesn't wake the remote again. On by
-                                    # default; the panel can turn it off.
+                                    # doesn't wake the remote again. Off by
+                                    # default; the panel can turn it on, but it also
+                                    # downloads old outputs that get viewed.
     "gpu_keepalive_enabled": False,   # opt-in: extend the shadow relay's own
                                        # open websocket connection to the GPU
                                        # while /view or /viewvideo activity
