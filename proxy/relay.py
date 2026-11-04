@@ -556,6 +556,7 @@ async def _run_relay(client_id: str):
 
                     last_queue_remaining = _status_queue_remaining(parsed, last_queue_remaining)
                     files_cache.note_message(parsed)  # remember that a job saved a file to the output folder
+                    viewcache.note_job_message(parsed)  # remember the output files this job reports
                     if isinstance(parsed, dict) and parsed.get("type") == RESOURCE_MONITOR_EVENT:
                         _resource_monitor_seen[client_id] = time.monotonic()
 
@@ -604,6 +605,9 @@ async def _run_relay(client_id: str):
                                 finished = True
 
                     if finished:
+                        # "Auto-download jobs output": the job is done, so fetch the files it saved (for
+                        # queue_remaining==0 without a prompt_id: those of every job seen so far).
+                        viewcache.download_job_outputs(finished_prompt_id)
                         if finished_prompt_id:
                             state.mark_job_done(finished_prompt_id)
                         else:

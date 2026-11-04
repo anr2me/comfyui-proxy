@@ -466,6 +466,89 @@ def has_active_downloads(use_cpu=False):
     return False
 
 
+# ---------------------------------------------------------------------------
+# "Auto-download jobs output": files a job wrote, fetched as soon as it finishes
+# ---------------------------------------------------------------------------
+# relay.py passes every remote websocket message to note_job_message(), which
+# remembers the output files that the "executed" messages of each job report.
+# When the job is done, download_job_outputs() hands every one of them that is
+# not on this computer yet to the same background download the viewed files
+# use. Only jobs seen finishing here are downloaded, so old jobs are left alone.
+
+MAX_TRACKED_JOBS = 200  # a job that never finishes can't make this grow forever
+_job_outputs = {}       # prompt_id -> {(subfolder, filename), ...}
+
+
+def downloads_enabled():
+    """True while the proxy is on and at least one auto-download setting is."""
+    return bool(cfgmod.get("enabled")) and bool(
+        cfgmod.get("auto_download_viewed") or cfgmod.get("auto_download_job_outputs")
+    )
+
+
+def _cpu_target_configured():
+    """Same rule as server_hooks: a CPU URL that differs from the GPU URL."""
+    cpu_url = (cfgmod.get("remote_cpu_url") or "").rstrip("/")
+    return bool(cpu_url) and cpu_url != (cfgmod.get("remote_url") or "").rstrip("/")
+
+
+def note_job_message(parsed):
+    """Remember the files an "executed" message says a job saved to the output folder."""
+    if not isinstance(parsed, dict) or parsed.get("type") != "executed":
+        return
+    if not cfgmod.get("auto_download_job_outputs"):
+        return
+    data = parsed.get("data")
+    if not isinstance(data, dict):
+        return
+    prompt_id, output = data.get("prompt_id"), data.get("output")
+    if not prompt_id or not isinstance(output, dict):
+        return
+    for items in output.values():  # "images", "gifs", ... (each a list of file descriptions)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict) or item.get("type") != "output":
+                continue  # not a saved file (a temp preview, or not a file at all)
+            name, subfolder = item.get("filename"), item.get("subfolder") or ""
+            if isinstance(name, str) and name and isinstance(subfolder, str):
+                _job_outputs.setdefault(prompt_id, set()).add((subfolder, name))
+    while len(_job_outputs) > MAX_TRACKED_JOBS:
+        _job_outputs.pop(next(iter(_job_outputs)))
+
+
+def download_job_outputs(prompt_id=None):
+    """A job finished: start downloading the output files it reported that are
+    not on this computer yet. Without a prompt_id, do it for every job noted so
+    far. Returns how many downloads were started."""
+    ids = [prompt_id] if prompt_id else list(_job_outputs)
+    files = set()
+    for pid in ids:
+        files |= _job_outputs.pop(pid, set())
+    if not files:
+        return 0
+    if not (cfgmod.get("enabled") and cfgmod.get("remote_url") and cfgmod.get("auto_download_job_outputs")):
+        return 0
+    use_cpu = _cpu_target_configured()  # the same file-only target /view uses
+    started = 0
+    for subfolder, filename in sorted(files):
+        query = {"filename": filename, "type": "output", "subfolder": subfolder}
+        path = local_path_for(query)
+        if path is None or os.path.exists(path):  # unsafe path, or already here: keep it as is
+            continue
+        entry = _entries.get(path)
+        if entry is None:
+            entry = _entries[path] = _Entry(path)
+        entry.root = "output"
+        entry.fill_ctx = ("/view", [(k, query[k]) for k in _FILL_QUERY_KEYS], use_cpu)
+        entry.last_activity = time.monotonic()
+        _start_fill(entry)
+        started += 1
+    if started:
+        logger.info(f"[ComfyUI Proxy] Downloading {started} output file(s) of the finished job to your local output folder.")
+    return started
+
+
 async def _fill(entry):
     global _fill_sem
     if _fill_sem is None:
@@ -509,7 +592,7 @@ async def _fill_inner(entry):
 
     stalls = 0
     while not (entry.failed or entry.done):
-        if not (cfgmod.get("enabled") and cfgmod.get("auto_download_viewed")):
+        if not downloads_enabled():
             return
         if forwarder.circuit_is_open(use_cpu):
             return  # remote is known to be unresponsive; try again on the next view

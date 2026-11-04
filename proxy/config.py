@@ -56,6 +56,12 @@ DEFAULT_CONFIG = {
                                   # tear the shadow connection down
     "jobs_history_max_entries": 500,  # finished jobs to remember in jobs_history.db
                                        # per remote URL (oldest dropped first)
+    "auto_download_job_outputs": True,  # right after a job finishes, save the files
+                                        # it wrote (type=output) into the local output
+                                        # folder (see viewcache.py). Only jobs that finish
+                                        # while the proxy watches: old jobs are never
+                                        # downloaded, unlike auto_download_viewed. On by
+                                        # default; the panel can turn it off.
     "auto_download_viewed": True,  # save files viewed via /view (type=output/
                                     # input) into the local output/input folder
                                     # and serve them from there afterwards (see

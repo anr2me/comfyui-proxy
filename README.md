@@ -78,6 +78,12 @@ Tap the pill, then the label, to open the panel.
   still lists your older jobs after ComfyUI or the remote restarts, without
   waking the remote. Deleting or clearing jobs in the panel removes them
   from it too.
+- **Auto-download jobs output** *(on by default)* — saves the output files of a
+  job to your local `output` folder when the job finishes. It does not download
+  the output of old jobs. If a file with the same name already exists, the proxy
+  keeps it. Big files download in the background and resume if interrupted. The
+  connection to the GPU stays open until the downloads finish. If you have a
+  **Remote CPU URL**, the CPU endpoint sends the files.
 - **Auto-download viewed input/output** *(on by default)* — saves the
   images and videos you view in the Media Assets panel to your local
   `output` / `input` folder. Once a file is saved, it's shown from your own
@@ -121,7 +127,7 @@ Tap the pill, then the label, to open the panel.
   up just to look.
 - Once a job finishes, the proxy keeps things open just long enough for the
   progress bar and final log lines to arrive, then disconnects — unless a
-  file you viewed is still being auto-downloaded (it waits for that to
+  file is still being auto-downloaded (it waits for that to
   finish) or you've turned on **Keep GPU warm**.
 - If the remote refuses a job (for example, a node has a value that is not in
   its list), the error dialog shows as usual. The proxy then closes the live

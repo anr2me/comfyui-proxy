@@ -993,7 +993,7 @@ def setup():
             "post_completion_delay", "jobs_history_max_entries",
             "gpu_keepalive_enabled", "gpu_keepalive_idle_timeout",
             "circuit_breaker_cooldown", "circuit_breaker_max_failures",
-            "auto_download_viewed",
+            "auto_download_job_outputs", "auto_download_viewed",
         }
         clean = {k: v for k, v in patch.items() if k in allowed}
         if "remote_url" in clean:
@@ -1015,6 +1015,8 @@ def setup():
                 clean["jobs_history_max_entries"] = max(1, int(clean["jobs_history_max_entries"]))
             except (TypeError, ValueError):
                 clean.pop("jobs_history_max_entries", None)
+        if "auto_download_job_outputs" in clean:
+            clean["auto_download_job_outputs"] = bool(clean["auto_download_job_outputs"])
         if "auto_download_viewed" in clean:
             clean["auto_download_viewed"] = bool(clean["auto_download_viewed"])
         if "gpu_keepalive_enabled" in clean:
@@ -1045,7 +1047,7 @@ def setup():
         newly_enabled = clean.get("enabled") and not prev.get("enabled")
 
         cfg = cfgmod.update_config(clean)
-        if not cfg.get("auto_download_viewed") or url_changed:
+        if not (cfg.get("auto_download_viewed") or cfg.get("auto_download_job_outputs")) or url_changed:
             viewcache.cancel_all()  # stop background file downloads (turned off, or endpoint switched)
 
         if cfg.get("enabled") and cfg.get("remote_url") and (url_changed or newly_enabled or not models_cache.cached_models(cfg)):

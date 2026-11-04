@@ -196,6 +196,13 @@ app.registerExtension({
             "How many finished jobs to remember on this computer (in jobs_history.db), so the Media " +
             "Assets panel still lists them after ComfyUI or the remote restarts. Oldest are dropped first.";
 
+        const autoDlJobsInput = checkboxField(
+            "Auto-download jobs output",
+            "Right after a job finishes, saves the files it created (type=output) into your local " +
+            "ComfyUI output folder. Only new jobs are downloaded; the outputs of old jobs are not. " +
+            "A file that already exists locally is kept as is."
+        );
+
         const autoDlInput = checkboxField(
             "Auto-download viewed input/output",
             "Saves files the UI views from the remote (type=output / type=input, as used by the Media " +
@@ -320,6 +327,7 @@ app.registerExtension({
             delayInput.value = cfg.post_completion_delay ?? defaults.post_completion_delay ?? "";
             jobsHistoryInput.value = cfg.jobs_history_max_entries ?? defaults.jobs_history_max_entries ?? "";
             circuitCooldownInput.value = cfg.circuit_breaker_cooldown ?? defaults.circuit_breaker_cooldown ?? "";
+            autoDlJobsInput.checked = !!cfg.auto_download_job_outputs;
             autoDlInput.checked = !!cfg.auto_download_viewed;
             keepaliveInput.checked = !!cfg.gpu_keepalive_enabled;
             keepaliveIdleInput.value = cfg.gpu_keepalive_idle_timeout ?? defaults.gpu_keepalive_idle_timeout ?? "";
@@ -411,6 +419,7 @@ app.registerExtension({
                 post_completion_delay: parseFloat(delayInput.value),
                 jobs_history_max_entries: parseInt(jobsHistoryInput.value, 10),
                 circuit_breaker_cooldown: parseFloat(circuitCooldownInput.value),
+                auto_download_job_outputs: autoDlJobsInput.checked,
                 auto_download_viewed: autoDlInput.checked,
                 gpu_keepalive_enabled: keepaliveInput.checked,
                 gpu_keepalive_idle_timeout: parseFloat(keepaliveIdleInput.value),
