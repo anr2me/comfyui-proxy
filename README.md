@@ -170,10 +170,13 @@ Tap the pill, then the label, to open the panel.
   them (watch for "database is locked" message).
 - If your computer has no GPU, these resource monitors show a placeholder GPU
   (an NVIDIA L4 with 24 GB by default), so their GPU meters still appear:
-  Crystools (the original, or its MonitorOnly fork), comfyui-resource-monitor
-  and ComfyUI-KikoStats. While a job runs, they show the readings of the
-  remote GPU. For this, install the same monitor on the remote. The proxy does
-  not change the other values that KikoStats shows, such as the temperature.
+  Crystools (the original, or its MonitorOnly fork), comfyui-resource-monitor,
+  ComfyUI-KikoStats and ComfyUI Advanced Monitor. While a job runs, they show
+  the readings of the remote GPU. For this, install the same monitor on the
+  remote. The proxy does not change the other values that KikoStats shows, such
+  as the temperature. Advanced Monitor shows "—" instead of a temperature for
+  the placeholder GPU. While a job runs, its unload and purge actions (click
+  the VRAM or RAM meter) affect the remote machine, not your computer.
   To change the placeholder, edit `GPU_NAME`, `GPU_COUNT` and `GPU_VRAM_GB`
   near the top of `proxy/config.py`.
 - The proxy's own log lines, and the error messages it shows in the UI,

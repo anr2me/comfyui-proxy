@@ -12,9 +12,10 @@ Routing rules:
     remote (queuing/checking a job, or preparing input for one).
   - /interrupt, /free, and browsing/history routes (/history*, /view*,
     /viewvideo*, /api/crystools*, /api/crysmonitor/monitor*,
-    /api/resource-monitor*) are only forwarded while a job is known to be
-    incomplete or its shadow progress relay is live — they're not worth a
-    cold start on their own (e.g. opening the logs console while idle).
+    /api/resource-monitor*, /api/advanced_monitor*) are only forwarded while a
+    job is known to be incomplete or its shadow progress relay is live —
+    they're not worth a cold start on their own (e.g. opening the logs
+    console while idle).
     Older remote job history simply won't show once the relay has closed;
     this is a deliberate cost/idle-wake tradeoff, not a bug.
   - /api/jobs is handled specially (see jobs_cache.py): finished jobs are
@@ -72,6 +73,15 @@ Routing rules:
     every other value (usage, temperature, ...) is left exactly as KikoStats
     reported it. Those local events are held back, per browser, while the remote's
     own are arriving through the shadow stream.
+  - ComfyUI Advanced Monitor gets a fake GPU too (config.GPU_NAME / GPU_COUNT /
+    GPU_VRAM_GB). It pushes "cam.monitor" websocket events to every browser. A
+    local one with an empty "gpus" list gets the fake GPU(s) added (utilization
+    0, temperature unknown), and so does GET /advanced_monitor/status. Those
+    local events are held back, per browser, while the remote's own are
+    arriving through the shadow stream. Its refresh-rate and unload/purge
+    requests (/advanced_monitor/*) are forwarded only while a job is known to
+    be incomplete or its shadow progress relay is live, so the purge actions
+    then work on the remote GPU.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -139,10 +149,13 @@ LOCAL_ONLY_ASSET_PREFIXES = ("/api/assets/seed", "/api/assets/prune")
 # names the LOCAL extension folder (for its stylesheet) and must stay local.
 # "/api/resource-monitor" is comfyui-resource-monitor's API (snapshot, configure,
 # disconnect); its readings otherwise arrive as websocket events, see below.
+# "/api/advanced_monitor" is ComfyUI Advanced Monitor's API (status, refresh rate,
+# unload/purge); its readings arrive as websocket events too, see below.
 # "/api/jobs" GET requests are handled separately below (with a local
 # response cache); this prefix only still matters here for any other method.
 EXTRA_CONDITIONAL_PREFIXES = (
     "/api/jobs", "/api/crystools", "/api/crysmonitor/monitor", "/api/resource-monitor",
+    "/api/advanced_monitor",
 )
 
 
@@ -603,7 +616,8 @@ def _fake_gpu_list() -> list:
 
 def _log_fake_gpu_once() -> None:
     """Say, once, that the monitors are being shown a fake GPU (Crystools, its
-    MonitorOnly fork and comfyui-resource-monitor all share this message)."""
+    MonitorOnly fork, comfyui-resource-monitor, KikoStats and Advanced Monitor
+    all share this message)."""
     global _fake_gpu_logged
     if _fake_gpu_logged:
         return
@@ -611,7 +625,7 @@ def _log_fake_gpu_once() -> None:
     fake = _fake_gpu_list()
     logger.info(
         f"[ComfyUI Proxy] No local GPU detected; reporting {len(fake)}x {fake[0]['name']} "
-        "fake GPU to Crystools/Resource Monitor."
+        "fake GPU to the resource monitors."
     )
 
 
@@ -743,12 +757,54 @@ def _fake_kikostats_reading(data):
                             "memory_total": int(cfgmod.GPU_VRAM_GB * 1024)}}
 
 
+def _fake_advanced_gpus() -> list:
+    """The fake GPU(s) in the form ComfyUI Advanced Monitor reports its GPUs in.
+    Only the VRAM total is known: utilization and VRAM use are 0, and the
+    temperature is -1, which that monitor shows as "—"."""
+    total = int(cfgmod.GPU_VRAM_GB * 1024 ** 3)
+    return [
+        {"index": g["index"], "name": g["name"], "utilization": 0, "temperature": -1,
+         "vram_used": 0, "vram_total": total, "vram_percent": 0}
+        for g in _fake_gpu_list()
+    ]
+
+
+def _fake_advanced_reading(data):
+    """A copy of a ComfyUI Advanced Monitor reading ("cam.monitor", or the snapshot
+    in its status answer) with the fake GPU(s) in it, if the reading lists no GPU.
+    CPU, RAM and disk stay as reported. Anything else comes back as is."""
+    if not isinstance(data, dict) or data.get("gpus") != []:
+        return data
+    _log_fake_gpu_once()
+    return {**data, "gpus": _fake_advanced_gpus()}
+
+
+def _maybe_fake_advanced_status(resp: web.StreamResponse) -> web.StreamResponse:
+    """The local answer of GET /advanced_monitor/status, with the fake GPU(s) in it
+    when it says there is no GPU."""
+    if not isinstance(resp, web.Response) or resp.status != 200:
+        return resp
+    raw = resp.body
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return resp
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return resp
+    if not isinstance(data, dict) or data.get("gpu_available") is not False:
+        return resp
+    data = {**data, "gpu_available": True, "gpu_names": [g["name"] for g in _fake_advanced_gpus()]}
+    if isinstance(data.get("snapshot"), dict):
+        data["snapshot"] = _fake_advanced_reading(data["snapshot"])
+    return web.json_response(data)
+
+
 def _hook_resource_monitor_events(server) -> None:
-    """Put the fake GPU into the readings comfyui-resource-monitor and
-    ComfyUI-KikoStats push to the browser as websocket events (they never pass
-    through the middleware), and hold them back for a client whose remote is
-    sending its own through the shadow stream, which would otherwise alternate
-    with them."""
+    """Put the fake GPU into the readings comfyui-resource-monitor,
+    ComfyUI-KikoStats and ComfyUI Advanced Monitor push to the browser as
+    websocket events (they never pass through the middleware), and hold them
+    back for a client whose remote is sending its own through the shadow
+    stream, which would otherwise alternate with them."""
     original = server.send
     if getattr(original, "_comfyui_proxy_hook", False):
         return
@@ -758,11 +814,13 @@ def _hook_resource_monitor_events(server) -> None:
             if sid is not None and relay.remote_streams_resource_monitor(sid):
                 return
             data = _fake_resource_snapshot(data)
-        elif event == relay.KIKOSTATS_EVENT and _is_enabled():
-            # KikoStats broadcasts (sid is None), so decide for each browser.
-            data = _fake_kikostats_reading(data)
+        elif event in (relay.KIKOSTATS_EVENT, relay.ADVANCED_MONITOR_EVENT) and _is_enabled():
+            # KikoStats and Advanced Monitor broadcast (sid is None), so decide for each browser.
+            kiko = event == relay.KIKOSTATS_EVENT
+            data = _fake_kikostats_reading(data) if kiko else _fake_advanced_reading(data)
+            remote_sends = relay.remote_streams_kikostats if kiko else relay.remote_streams_advanced_monitor
             for cid in ([sid] if sid is not None else list(getattr(server, "sockets", ()))):
-                if not relay.remote_streams_kikostats(cid):
+                if not remote_sends(cid):
                     await original(event, data, cid)
             return
         return await original(event, data, sid)
@@ -920,6 +978,8 @@ async def proxy_middleware(request: web.Request, handler):
                 resp = _maybe_fake_crystools_gpu(resp, m.group(1))
         if _is_enabled() and canonical in _FAKE_RESOURCE_ROUTES:
             resp = _maybe_fake_resource_gpu(resp)
+        if _is_enabled() and request.method == "GET" and canonical == "/advanced_monitor/status":
+            resp = _maybe_fake_advanced_status(resp)
         return resp
 
     if canonical == "/prompt" and request.method == "POST":

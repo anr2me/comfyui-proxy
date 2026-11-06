@@ -97,6 +97,12 @@ _resource_monitor_seen = {}  # client_id -> time.monotonic() when the remote las
 KIKOSTATS_EVENT = "kikostats.monitor"
 _kikostats_seen = {}  # client_id -> time.monotonic() when the remote last sent it a reading
 
+# ComfyUI Advanced Monitor: same idea. Its service broadcasts one reading per refresh
+# interval as this websocket event; local ones are held back while the remote's own are
+# arriving (see remote_streams_advanced_monitor()).
+ADVANCED_MONITOR_EVENT = "cam.monitor"
+_advanced_monitor_seen = {}  # client_id -> time.monotonic() when the remote last sent it a reading
+
 WS_CLOSE_TIMEOUT = 10.0  # how long closing the shadow websocket may wait for the remote's close frame
 IDLE_CHECK_INTERVAL = 5.0  # how often _idle_watchdog() looks at its stream
 
@@ -200,6 +206,14 @@ def remote_streams_kikostats(client_id) -> bool:
     through the shadow stream, so the readings of the local one can be held back
     instead of fighting with them."""
     seen = _kikostats_seen.get(client_id)
+    return seen is not None and time.monotonic() - seen < RESOURCE_MONITOR_FRESH_S
+
+
+def remote_streams_advanced_monitor(client_id) -> bool:
+    """True while the remote is sending this client ComfyUI Advanced Monitor
+    readings through the shadow stream, so the readings of the local one can be
+    held back instead of fighting with them."""
+    seen = _advanced_monitor_seen.get(client_id)
     return seen is not None and time.monotonic() - seen < RESOURCE_MONITOR_FRESH_S
 
 
@@ -575,6 +589,8 @@ async def _run_relay(client_id: str):
                         _resource_monitor_seen[client_id] = time.monotonic()
                     elif isinstance(parsed, dict) and parsed.get("type") == KIKOSTATS_EVENT:
                         _kikostats_seen[client_id] = time.monotonic()
+                    elif isinstance(parsed, dict) and parsed.get("type") == ADVANCED_MONITOR_EVENT:
+                        _advanced_monitor_seen[client_id] = time.monotonic()
 
                     if not got_sid:
                         # This very first message arrives right after connecting,
@@ -758,6 +774,7 @@ async def _run_relay(client_id: str):
                 _ready_events.pop(client_id, None)
                 _resource_monitor_seen.pop(client_id, None)
                 _kikostats_seen.pop(client_id, None)
+                _advanced_monitor_seen.pop(client_id, None)
                 # Whatever jobs were tracked against this client stop being tracked
                 # the moment we can no longer observe them, regardless of why the
                 # relay ended (clean completion, connect timeout, ws error, ...).
