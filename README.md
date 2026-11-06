@@ -168,13 +168,14 @@ Tap the pill, then the label, to open the panel.
   job, since that scan walks the whole folder). If both containers run it on
   one shared user folder, ComfyUI's lock on the database may not hold across
   them (watch for "database is locked" message).
-- If your computer has no GPU of its own, the Crystools resource monitor
-  (the original, or its MonitorOnly fork) and comfyui-resource-monitor list a
-  placeholder one (an NVIDIA L4 with 24 GB by default) so their GPU meters
-  still appear; while a job runs they show the remote GPU's real readings —
-  for that, the remote needs the same monitor installed. To change the
-  placeholder, edit `GPU_NAME`, `GPU_COUNT` and `GPU_VRAM_GB` near the top of
-  `proxy/config.py`.
+- If your computer has no GPU, these resource monitors show a placeholder GPU
+  (an NVIDIA L4 with 24 GB by default), so their GPU meters still appear:
+  Crystools (the original, or its MonitorOnly fork), comfyui-resource-monitor
+  and ComfyUI-KikoStats. While a job runs, they show the readings of the
+  remote GPU. For this, install the same monitor on the remote. The proxy does
+  not change the other values that KikoStats shows, such as the temperature.
+  To change the placeholder, edit `GPU_NAME`, `GPU_COUNT` and `GPU_VRAM_GB`
+  near the top of `proxy/config.py`.
 - The proxy's own log lines, and the error messages it shows in the UI,
   replace sensitive information such as the host of your remote URLs and your auth keys with placeholders
   such as `<RemoteGPU_Host>` and `<RemoteGPU_AuthKey>`, so they can be safely pasted into a bug report.  
