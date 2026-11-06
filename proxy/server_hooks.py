@@ -66,6 +66,12 @@ Routing rules:
     events its local service pushes; all of the local ones say there is no GPU,
     so each gets one added. Those local events are held back while the remote's
     own are arriving through the shadow stream.
+  - ComfyUI-KikoStats gets a fake GPU too (config.GPU_VRAM_GB). It only pushes
+    "kikostats.monitor" websocket events, to every browser. A local one that says
+    there is no GPU is changed to say there is one, with the VRAM total filled in;
+    every other value (usage, temperature, ...) is left exactly as KikoStats
+    reported it. Those local events are held back, per browser, while the remote's
+    own are arriving through the shadow stream.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -725,11 +731,24 @@ def _maybe_fake_resource_gpu(resp: web.StreamResponse) -> web.StreamResponse:
     return web.json_response(data)
 
 
+def _fake_kikostats_reading(data):
+    """A copy of a ComfyUI-KikoStats reading with the fake GPU in it, if the reading
+    says there is no GPU. Only "available" and the VRAM total (in MB) are set; the
+    other values stay as KikoStats reported them. Anything else comes back as is."""
+    gpu = data.get("gpu") if isinstance(data, dict) else None
+    if not isinstance(gpu, dict) or gpu.get("available") is not False:
+        return data
+    _log_fake_gpu_once()
+    return {**data, "gpu": {**gpu, "available": True,
+                            "memory_total": int(cfgmod.GPU_VRAM_GB * 1024)}}
+
+
 def _hook_resource_monitor_events(server) -> None:
-    """Put the fake GPU into the readings comfyui-resource-monitor pushes to the
-    browser as websocket events (they never pass through the middleware), and hold
-    them back for a client whose remote is sending its own through the shadow
-    stream, which would otherwise alternate with them."""
+    """Put the fake GPU into the readings comfyui-resource-monitor and
+    ComfyUI-KikoStats push to the browser as websocket events (they never pass
+    through the middleware), and hold them back for a client whose remote is
+    sending its own through the shadow stream, which would otherwise alternate
+    with them."""
     original = server.send
     if getattr(original, "_comfyui_proxy_hook", False):
         return
@@ -739,6 +758,13 @@ def _hook_resource_monitor_events(server) -> None:
             if sid is not None and relay.remote_streams_resource_monitor(sid):
                 return
             data = _fake_resource_snapshot(data)
+        elif event == relay.KIKOSTATS_EVENT and _is_enabled():
+            # KikoStats broadcasts (sid is None), so decide for each browser.
+            data = _fake_kikostats_reading(data)
+            for cid in ([sid] if sid is not None else list(getattr(server, "sockets", ()))):
+                if not relay.remote_streams_kikostats(cid):
+                    await original(event, data, cid)
+            return
         return await original(event, data, sid)
 
     send._comfyui_proxy_hook = True
