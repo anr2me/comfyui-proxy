@@ -18,13 +18,13 @@ CONFIG_PATH = os.path.join(_PACKAGE_DIR, "proxy_config.json")
 JOBS_DB_PATH = os.path.join(_PACKAGE_DIR, "jobs_history.db")
 
 # Fake GPU reported to the Crystools monitor (or its MonitorOnly fork), to
-# comfyui-resource-monitor, ComfyUI-KikoStats, ComfyUI Advanced Monitor and
-# Feixue Universal Monitor when their GPU requests stay local and this machine
-# has no GPU (see server_hooks.py).
+# comfyui-resource-monitor, ComfyUI-KikoStats, ComfyUI Advanced Monitor,
+# Feixue Universal Monitor and ComfyUI Vitals when their GPU requests stay
+# local and this machine has no GPU (see server_hooks.py).
 # Edit here; deliberately not a saved setting and not shown in the UI panel.
 GPU_NAME = "L4"   # reported as "NVIDIA L4"
-GPU_COUNT = 1     # Crystools and Advanced Monitor; the others show a single GPU
-GPU_VRAM_GB = 24  # the total VRAM comfyui-resource-monitor, KikoStats, Advanced Monitor and Feixue show for it (an L4 has 24 GB)
+GPU_COUNT = 1     # Crystools, Advanced Monitor and Vitals; the others show a single GPU
+GPU_VRAM_GB = 24  # the total VRAM comfyui-resource-monitor, KikoStats, Advanced Monitor, Feixue and Vitals show for it (an L4 has 24 GB)
 
 # Placeholder jobs shown in the UI's queue while a prompt waits for the remote GPU
 # to wake up (see placeholders.py) normally disappear as soon as that submission

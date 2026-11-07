@@ -171,11 +171,13 @@ Tap the pill, then the label, to open the panel.
 - If your computer has no GPU, the proxy shows a placeholder GPU (an NVIDIA L4
   with 24 GB by default). The GPU meters of these monitors then still appear:
   Crystools (the original, or its MonitorOnly fork), comfyui-resource-monitor,
-  ComfyUI-KikoStats, ComfyUI Advanced Monitor and Feixue Universal Monitor.
+  ComfyUI-KikoStats, ComfyUI Advanced Monitor, Feixue Universal Monitor and
+  ComfyUI Vitals.
   While a job runs, they show the readings of the remote GPU. To do this,
   install the same monitor on the remote. The proxy does not change the other
   values that KikoStats and Feixue show, such as the temperature. Advanced
-  Monitor shows "—" instead of a temperature for the placeholder GPU. While a
+  Monitor shows "—" and Vitals shows "N/A" instead of a temperature for the
+  placeholder GPU. While a
   job runs, these actions affect the remote machine, not your computer: the
   unload and purge actions of Advanced Monitor (click the VRAM or RAM meter)
   and the **Deep Free Now** button of Feixue.
