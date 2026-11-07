@@ -51,6 +51,11 @@ Tap the pill, then the label, to open the panel.
   pointing it at the same URL as your GPU one does nothing useful.
 - **Remote CPU Auth Key** *(optional)* — bearer token for the CPU endpoint,
   if it needs one.
+- **Saved Auth Keys** — the proxy saves both Auth Keys as plain text in
+  `proxy_config.json`, in this folder. Keep this file private. Do not add it
+  to Git. If you change the host of a URL, the proxy removes the saved Auth
+  Key for that URL. This stops a key from going to a different server. Enter
+  the key again if the new endpoint needs one.
 - **Timeout** — how long to wait for the remote to respond before giving
   up, in seconds. Serverless GPUs can take a while to cold-start when
   capacity is scarce, so this defaults fairly high (300s). Raise it if you

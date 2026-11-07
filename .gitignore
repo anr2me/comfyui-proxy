@@ -15,3 +15,5 @@ remote_files_cache.json
 remote_files_cache.json.tmp
 # Published zip file
 node.zip
+# Saved settings, including the auth keys (see proxy/config.py). Never commit this file.
+proxy_config.json

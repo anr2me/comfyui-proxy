@@ -7,9 +7,11 @@ file directly.
 """
 
 import json
+import logging
 import math
 import os
 import threading
+from urllib.parse import urlsplit
 
 _PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(_PACKAGE_DIR, "proxy_config.json")
@@ -131,17 +133,65 @@ def save_config(cfg):
     with _lock:
         _config = cfg
         try:
-            with open(CONFIG_PATH, "w") as f:
+            # The file holds the auth keys, so only its owner may read it (0600).
+            # The mode applies when the file is created: chmod() fixes an older one.
+            fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.chmod(CONFIG_PATH, 0o600)
+            except OSError:
+                pass  # e.g. a file system without permissions: still save the config
+            with os.fdopen(fd, "w") as f:
                 json.dump(cfg, f, indent=2)
         except Exception as e:
             print(f"[ComfyUI Proxy] Failed to persist config: {e}")
 
 
+# Each auth key belongs to one URL setting: URL setting -> (its auth key, label for the log).
+_KEY_FOR_URL = {
+    "remote_url": ("auth_key", "GPU"),
+    "remote_cpu_url": ("remote_cpu_auth_key", "CPU"),
+}
+
+
+def _host_of(url) -> str:
+    """The host and port of a URL, in lower case and without any user:password.
+    A URL typed without its scheme is understood too. "" if there is no URL."""
+    url = url.strip() if isinstance(url, str) else ""
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url if "//" in url else "//" + url)
+        return f"{(parts.hostname or '').lower()}:{parts.port or ''}"
+    except ValueError:
+        return url.lower()  # not a valid URL: it counts as a different host
+
+
+def _orphaned_keys(cfg: dict, patch: dict) -> dict:
+    """The auth keys to clear because `patch` points their URL at another host
+    without bringing a new key. A key is meant for one server: without this, a
+    changed URL would make the proxy send the saved key to a host that never
+    received it."""
+    cleared = {}
+    for url_name, (key_name, _label) in _KEY_FOR_URL.items():
+        if url_name not in patch or key_name in patch or not cfg.get(key_name):
+            continue
+        if _host_of(patch[url_name]) != _host_of(cfg.get(url_name)):
+            cleared[key_name] = ""
+    return cleared
+
+
 def update_config(patch: dict):
     with _lock:
         cfg = load_config()
-        cfg = {**cfg, **patch}
+        cleared = _orphaned_keys(cfg, patch)
+        cfg = {**cfg, **patch, **cleared}
         save_config(cfg)
+        for url_name, (key_name, label) in _KEY_FOR_URL.items():
+            if key_name in cleared:
+                logging.getLogger("ComfyUIProxy").info(
+                    f"[ComfyUI Proxy] The Remote {label} URL now points to a different host, so the saved "
+                    f"Remote {label} Auth Key was removed. Enter the key again if the new endpoint needs one."
+                )
         return cfg
 
 
