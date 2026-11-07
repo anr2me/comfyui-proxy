@@ -84,7 +84,7 @@ Tap the pill, then the label, to open the panel.
   keeps it. Big files download in the background and resume if interrupted. The
   connection to the GPU stays open until the downloads finish. If you have a
   **Remote CPU URL**, the CPU endpoint sends the files.
-- **Auto-download viewed input/output** *(off by default)* — saves the
+- **Auto-download viewed input/output** *(on by default)* — saves the
   images and videos you view in the Media Assets panel to your local
   `output` / `input` folder. Once a file is saved, it's shown from your own
   computer, so switching browser tabs or reopening the panel no longer
