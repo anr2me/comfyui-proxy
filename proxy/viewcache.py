@@ -10,8 +10,8 @@ Assets panel uses); everything else behaves exactly as before.
     proxy hands it to ComfyUI's own /view handler, so thumbnails and videos
     show up without waking the remote.
   - If only part of it is on disk (see below), a Range request for bytes that
-    are all there is answered from that part, without asking the remote
-    (serve_partial()).
+    are all there is answered from that part, and so is a HEAD request (the
+    size is known), without asking the remote (serve_partial()).
   - Otherwise the request is forwarded as usual, and the bytes streaming
     back are also written into "<filename>.tmp" at the right offset (most
     /view requests are Range requests, so each response only covers part of
@@ -522,13 +522,21 @@ def _if_range_matches(value, etag, last_modified):
     return bool(last_modified) and value == last_modified
 
 
+def _guess_type(path):
+    return mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+
 async def serve_partial(request, path, use_cpu=False, remote_awake=False):
     """Answer a /view request from the part of the file that is already on disk,
     so the remote is not woken for bytes this computer has. Returns the response,
     or None when the request must go to the remote as before.
 
-    Only a plain GET with a Range header qualifies (one without it wants the whole
-    file, which is not here yet), and only when every byte it asks for is on disk.
+    A HEAD request gets the headers of the whole file (200, with the size saved in
+    the .map file) and no body. No byte has to be on disk for that, and Range is
+    ignored, because it is defined for GET only (RFC 9110).
+
+    A GET qualifies only with a Range header (one without it wants the whole file,
+    which is not here yet), and only when every byte it asks for is on disk.
     "bytes=N-", which is what video players send, gets the stretch from N to the
     end of the part that is there, as a shorter 206; the player then asks for the
     rest, and only that request reaches the remote.
@@ -539,7 +547,7 @@ async def serve_partial(request, path, use_cpu=False, remote_awake=False):
 
     `remote_awake`: a job is running, so the remote is up anyway; let the
     background download go on with the missing parts."""
-    if request.method != "GET":
+    if request.method not in ("GET", "HEAD"):
         return None
     if any(k in request.rel_url.query for k in _TRANSFORM_KEYS):
         return None  # the remote makes a thumbnail from the whole file
@@ -563,6 +571,20 @@ async def serve_partial(request, path, use_cpu=False, remote_awake=False):
         not_modified = _not_modified_since(h.get("If-Modified-Since"), entry.last_modified)
     if not_modified:
         return web.Response(status=304, headers=validators)
+
+    if request.method == "HEAD":  # headers only: nothing is read, and nothing is downloaded
+        resp = web.StreamResponse(status=200, headers={
+            **validators,
+            "Content-Type": _guess_type(path),
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(entry.total),
+        })
+        try:
+            await resp.prepare(request)
+            await resp.write_eof()
+        except ConnectionError:  # the browser went away
+            pass
+        return resp
 
     wanted = _parse_range(h.get("Range"), entry.total)
     if wanted is None:
@@ -588,7 +610,7 @@ async def serve_partial(request, path, use_cpu=False, remote_awake=False):
 
     headers = {
         **validators,
-        "Content-Type": mimetypes.guess_type(path)[0] or "application/octet-stream",
+        "Content-Type": _guess_type(path),
         "Accept-Ranges": "bytes",
         "Content-Range": f"bytes {start}-{end - 1}/{entry.total}",
         "Content-Length": str(end - start),

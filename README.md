@@ -96,8 +96,9 @@ Tap the pill, then the label, to open the panel.
   already exists, it's used as-is.
   If a file is only partly on your computer, the proxy plays the parts that
   you have from your computer. The remote starts only when you play or seek
-  to a part that you do not have yet. A preview or thumbnail of an
-  incomplete file still comes from the remote.
+  to a part that you do not have yet. The proxy also tells the file size and
+  type from your computer. A preview or thumbnail of an incomplete file
+  still comes from the remote.
 - **Keep GPU warm for video/image viewing** *(off by default)* — only
   relevant if you don't have a Remote CPU URL, and usually unnecessary if
   **Auto-download viewed input/output** is on. Normally, once a job
