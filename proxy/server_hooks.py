@@ -12,11 +12,11 @@ Routing rules:
     remote (queuing/checking a job, or preparing input for one).
   - /interrupt, /free, and browsing/history routes (/history*, /view*,
     /viewvideo*, /api/crystools*, /api/crysmonitor/monitor*,
-    /api/resource-monitor*, /api/advanced_monitor*, and the snapshot, rate,
-    queue_status and free_memory routes of /feixue_monitor/) are only forwarded
-    while a job is known to be incomplete or its shadow progress relay is live —
-    they're not worth a cold start on their own (e.g. opening the logs
-    console while idle).
+    /api/resource-monitor*, /api/advanced_monitor*, /vitals/stats, and the
+    snapshot, rate, queue_status and free_memory routes of /feixue_monitor/)
+    are only forwarded while a job is known to be incomplete or its shadow
+    progress relay is live — they're not worth a cold start on their own
+    (e.g. opening the logs console while idle).
     Older remote job history simply won't show once the relay has closed;
     this is a deliberate cost/idle-wake tradeoff, not a bug.
   - /api/jobs is handled specially (see jobs_cache.py): finished jobs are
@@ -96,6 +96,13 @@ Routing rules:
     free_memory requests are forwarded only while a job is known to be
     incomplete or its shadow progress relay is live, so its memory cleanup
     then works on the remote GPU.
+  - ComfyUI Vitals gets a fake GPU too (config.GPU_NAME / GPU_COUNT /
+    GPU_VRAM_GB). It polls GET /vitals/stats, which lists no GPU when this
+    computer has none; that answer gets the fake GPU(s) added (utilization
+    0, temperature unknown), and CPU and RAM stay as reported. The request
+    is forwarded only while a job is known to be incomplete or its shadow
+    progress relay is live, so Vitals then shows the remote's own readings
+    (the remote needs ComfyUI Vitals too).
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -180,6 +187,10 @@ FEIXUE_ROUTES = (
     "/feixue_monitor/snapshot", "/feixue_monitor/rate",
     "/feixue_monitor/queue_status", "/feixue_monitor/free_memory",
 )
+# ComfyUI Vitals' one route: its readings (CPU, RAM, GPU) are polled from here, so
+# there is no websocket event to cover. Forwarded like the routes above, i.e. only
+# while a job is known to be incomplete or its shadow progress relay is live.
+VITALS_ROUTES = ("/vitals/stats",)
 
 
 def _strip_api_prefix(path: str) -> str:
@@ -269,6 +280,8 @@ def _should_proxy(path: str) -> bool:
     if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
         return _remote_known_active()
     if canonical in FEIXUE_ROUTES:
+        return _remote_known_active()
+    if canonical in VITALS_ROUTES:
         return _remote_known_active()
     return False
 
@@ -641,8 +654,8 @@ def _fake_gpu_list() -> list:
 
 def _log_fake_gpu_once() -> None:
     """Say, once, that the monitors are being shown a fake GPU (Crystools, its
-    MonitorOnly fork, comfyui-resource-monitor, KikoStats, Advanced Monitor and
-    Feixue all share this message)."""
+    MonitorOnly fork, comfyui-resource-monitor, KikoStats, Advanced Monitor,
+    Feixue and Vitals all share this message)."""
     global _fake_gpu_logged
     if _fake_gpu_logged:
         return
@@ -873,6 +886,40 @@ def _maybe_fake_feixue_snapshot(resp: web.StreamResponse) -> web.StreamResponse:
     return web.json_response(faked)
 
 
+def _fake_vitals_reading(data):
+    """A copy of a ComfyUI-Vitals reading (the answer of GET /vitals/stats) with the
+    fake GPU(s) in it, if the reading lists no GPU. Only the GPU list and its status
+    text change; CPU and RAM stay as reported. Anything else comes back as is."""
+    if not isinstance(data, dict) or data.get("gpus") != []:
+        return data
+    _log_fake_gpu_once()
+    total = int(cfgmod.GPU_VRAM_GB * 1024 ** 3)
+    gpus = [
+        {"id": str(g["index"]), "name": g["name"], "utilization": 0,
+         "memory_used": 0, "memory_total": total, "temperature": None}
+        for g in _fake_gpu_list()
+    ]
+    return {**data, "gpus": gpus, "gpu_status": "Placeholder GPU. Real readings appear while a job runs."}
+
+
+def _maybe_fake_vitals_stats(resp: web.StreamResponse) -> web.StreamResponse:
+    """The local answer of GET /vitals/stats, with the fake GPU(s) in it when it
+    lists none."""
+    if not isinstance(resp, web.Response) or resp.status != 200:
+        return resp
+    raw = resp.body
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return resp
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return resp
+    faked = _fake_vitals_reading(data)
+    if faked is data:
+        return resp
+    return web.json_response(faked, headers={"Cache-Control": "no-store"})
+
+
 def _hook_resource_monitor_events(server) -> None:
     """Put the fake GPU into the readings comfyui-resource-monitor,
     ComfyUI-KikoStats, ComfyUI Advanced Monitor and Feixue Universal Monitor
@@ -1063,6 +1110,8 @@ async def proxy_middleware(request: web.Request, handler):
             resp = _maybe_fake_advanced_status(resp)
         if _is_enabled() and request.method == "GET" and canonical == "/feixue_monitor/snapshot":
             resp = _maybe_fake_feixue_snapshot(resp)
+        if _is_enabled() and request.method == "GET" and canonical in VITALS_ROUTES:
+            resp = _maybe_fake_vitals_stats(resp)
         return resp
 
     if canonical == "/prompt" and request.method == "POST":
