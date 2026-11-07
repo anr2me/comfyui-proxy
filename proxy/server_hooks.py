@@ -12,8 +12,9 @@ Routing rules:
     remote (queuing/checking a job, or preparing input for one).
   - /interrupt, /free, and browsing/history routes (/history*, /view*,
     /viewvideo*, /api/crystools*, /api/crysmonitor/monitor*,
-    /api/resource-monitor*, /api/advanced_monitor*) are only forwarded while a
-    job is known to be incomplete or its shadow progress relay is live —
+    /api/resource-monitor*, /api/advanced_monitor*, and the snapshot, rate,
+    queue_status and free_memory routes of /feixue_monitor/) are only forwarded
+    while a job is known to be incomplete or its shadow progress relay is live —
     they're not worth a cold start on their own (e.g. opening the logs
     console while idle).
     Older remote job history simply won't show once the relay has closed;
@@ -82,6 +83,19 @@ Routing rules:
     requests (/advanced_monitor/*) are forwarded only while a job is known to
     be incomplete or its shadow progress relay is live, so the purge actions
     then work on the remote GPU.
+  - Feixue Universal Monitor gets a fake GPU too (config.GPU_NAME /
+    GPU_VRAM_GB). It pushes "feixue.monitor" websocket events to every browser,
+    and GET /feixue_monitor/snapshot answers with the same reading. A local
+    reading that says there is no GPU ("data_source" is "none") gets the VRAM
+    total and the GPU name filled in, and is marked as coming from an NVIDIA
+    source; every other value is left exactly as Feixue reported it. The small
+    "delta" readings it sends between full ones carry no GPU values while the
+    local GPU does not change, so they pass through untouched. Local events
+    are held back, per browser, while the remote's own are arriving through
+    the shadow stream. Its snapshot, refresh-rate, queue_status and
+    free_memory requests are forwarded only while a job is known to be
+    incomplete or its shadow progress relay is live, so its memory cleanup
+    then works on the remote GPU.
   - Everything else (static assets, node definitions, settings, etc.) is
     left completely alone.
   - Waking the remote is only triggered by /prompt, /queue, an already-known
@@ -156,6 +170,15 @@ LOCAL_ONLY_ASSET_PREFIXES = ("/api/assets/seed", "/api/assets/prune")
 EXTRA_CONDITIONAL_PREFIXES = (
     "/api/jobs", "/api/crystools", "/api/crysmonitor/monitor", "/api/resource-monitor",
     "/api/advanced_monitor",
+)
+# Feixue Universal Monitor's routes are "/feixue_monitor/..." (also under "/api"), matched
+# against the canonical path. Only the four about resources are forwarded: its readings
+# (snapshot), its refresh rate, the queue (what its automatic cleanup waits for) and the
+# cleanup itself. Its status and diagnosis routes describe this computer and stay local.
+# Its websocket readings are covered below.
+FEIXUE_ROUTES = (
+    "/feixue_monitor/snapshot", "/feixue_monitor/rate",
+    "/feixue_monitor/queue_status", "/feixue_monitor/free_memory",
 )
 
 
@@ -244,6 +267,8 @@ def _should_proxy(path: str) -> bool:
         # target that is.
         return _remote_known_active() or _cpu_target_configured()
     if any(path == p or path.startswith(p + "/") for p in EXTRA_CONDITIONAL_PREFIXES):
+        return _remote_known_active()
+    if canonical in FEIXUE_ROUTES:
         return _remote_known_active()
     return False
 
@@ -616,8 +641,8 @@ def _fake_gpu_list() -> list:
 
 def _log_fake_gpu_once() -> None:
     """Say, once, that the monitors are being shown a fake GPU (Crystools, its
-    MonitorOnly fork, comfyui-resource-monitor, KikoStats and Advanced Monitor
-    all share this message)."""
+    MonitorOnly fork, comfyui-resource-monitor, KikoStats, Advanced Monitor and
+    Feixue all share this message)."""
     global _fake_gpu_logged
     if _fake_gpu_logged:
         return
@@ -799,26 +824,82 @@ def _maybe_fake_advanced_status(resp: web.StreamResponse) -> web.StreamResponse:
     return web.json_response(data)
 
 
+# The values of the one GPU Feixue lists when it has no GPU data source (all zero), for a
+# reading that somehow lacks them.
+_FEIXUE_EMPTY_GPU = {
+    "gpu_utilization": 0, "vram_used_mb": 0, "vram_percent": 0,
+    "gpu_temperature": 0.0, "power_draw": 0.0,
+}
+
+
+def _fake_feixue_reading(data):
+    """A copy of a Feixue Universal Monitor reading ("feixue.monitor", or the answer of
+    GET /feixue_monitor/snapshot) with the fake GPU in it, if the reading says that no
+    GPU data source is available ("data_source" is "none"). Feixue then still lists one
+    GPU, with every value 0 and no VRAM total: its name and VRAM total (in MB) are filled
+    in, and the reading is marked as coming from an NVIDIA source, because "none" may be
+    taken by the panel as "no GPU". The other values stay as Feixue reported them.
+    Anything else (a real GPU, a "delta" reading, something that is not a reading)
+    comes back as is."""
+    if not isinstance(data, dict) or data.get("data_source") != "none" or not isinstance(data.get("gpus"), list):
+        return data
+    _log_fake_gpu_once()
+    total = int(cfgmod.GPU_VRAM_GB * 1024)
+    name = _fake_gpu_name()
+    gpus = [g if isinstance(g, dict) else {} for g in data["gpus"]] or [{}]
+    return {
+        **data,
+        "data_source": "nvidia",
+        "data_source_quality": "full",
+        "gpus": [{**_FEIXUE_EMPTY_GPU, **g, "device_name": name, "vram_total_mb": total} for g in gpus],
+    }
+
+
+def _maybe_fake_feixue_snapshot(resp: web.StreamResponse) -> web.StreamResponse:
+    """The local answer of GET /feixue_monitor/snapshot, with the fake GPU in it when
+    it says there is none."""
+    if not isinstance(resp, web.Response) or resp.status != 200:
+        return resp
+    raw = resp.body
+    if not isinstance(raw, (bytes, bytearray)) or not raw:
+        return resp
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return resp
+    faked = _fake_feixue_reading(data)
+    if faked is data:
+        return resp
+    return web.json_response(faked)
+
+
 def _hook_resource_monitor_events(server) -> None:
     """Put the fake GPU into the readings comfyui-resource-monitor,
-    ComfyUI-KikoStats and ComfyUI Advanced Monitor push to the browser as
-    websocket events (they never pass through the middleware), and hold them
-    back for a client whose remote is sending its own through the shadow
-    stream, which would otherwise alternate with them."""
+    ComfyUI-KikoStats, ComfyUI Advanced Monitor and Feixue Universal Monitor
+    push to the browser as websocket events (they never pass through the
+    middleware), and hold them back for a client whose remote is sending its
+    own through the shadow stream, which would otherwise alternate with them."""
     original = server.send
     if getattr(original, "_comfyui_proxy_hook", False):
         return
+
+    # The monitors that broadcast their readings (sid is None): event ->
+    # (puts the fake GPU into a reading, True while the remote streams its own to a client).
+    broadcasts = {
+        relay.KIKOSTATS_EVENT: (_fake_kikostats_reading, relay.remote_streams_kikostats),
+        relay.ADVANCED_MONITOR_EVENT: (_fake_advanced_reading, relay.remote_streams_advanced_monitor),
+        relay.FEIXUE_MONITOR_EVENT: (_fake_feixue_reading, relay.remote_streams_feixue_monitor),
+    }
 
     async def send(event, data, sid=None):
         if event == relay.RESOURCE_MONITOR_EVENT and _is_enabled():
             if sid is not None and relay.remote_streams_resource_monitor(sid):
                 return
             data = _fake_resource_snapshot(data)
-        elif event in (relay.KIKOSTATS_EVENT, relay.ADVANCED_MONITOR_EVENT) and _is_enabled():
-            # KikoStats and Advanced Monitor broadcast (sid is None), so decide for each browser.
-            kiko = event == relay.KIKOSTATS_EVENT
-            data = _fake_kikostats_reading(data) if kiko else _fake_advanced_reading(data)
-            remote_sends = relay.remote_streams_kikostats if kiko else relay.remote_streams_advanced_monitor
+        elif event in broadcasts and _is_enabled():
+            # These monitors broadcast (sid is None), so decide for each browser.
+            fake_gpu, remote_sends = broadcasts[event]
+            data = fake_gpu(data)
             for cid in ([sid] if sid is not None else list(getattr(server, "sockets", ()))):
                 if not remote_sends(cid):
                     await original(event, data, cid)
@@ -980,6 +1061,8 @@ async def proxy_middleware(request: web.Request, handler):
             resp = _maybe_fake_resource_gpu(resp)
         if _is_enabled() and request.method == "GET" and canonical == "/advanced_monitor/status":
             resp = _maybe_fake_advanced_status(resp)
+        if _is_enabled() and request.method == "GET" and canonical == "/feixue_monitor/snapshot":
+            resp = _maybe_fake_feixue_snapshot(resp)
         return resp
 
     if canonical == "/prompt" and request.method == "POST":
