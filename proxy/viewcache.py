@@ -9,6 +9,9 @@ Assets panel uses); everything else behaves exactly as before.
     (<dir>/<subfolder>/<filename>), the request is NOT forwarded at all: the
     proxy hands it to ComfyUI's own /view handler, so thumbnails and videos
     show up without waking the remote.
+  - If only part of it is on disk (see below), a Range request for bytes that
+    are all there is answered from that part, without asking the remote
+    (serve_partial()).
   - Otherwise the request is forwarded as usual, and the bytes streaming
     back are also written into "<filename>.tmp" at the right offset (most
     /view requests are Range requests, so each response only covers part of
@@ -29,14 +32,17 @@ background download of the real file instead.
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
 import threading
 import time
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode, urlsplit
 
 import aiohttp
 import folder_paths
+from aiohttp import web
 
 from . import config as cfgmod
 from . import forwarder
@@ -57,8 +63,10 @@ FILL_DELAY = 2.0                      # quiet period (s) before a background dow
                                       # video player's follow-up Range requests aren't fetched twice
 SCAN_DELAY = 3.0                      # quiet period (s) after the last finished file before the local
                                       # asset scan is requested, so a burst becomes one scan
+SERVE_CHUNK = 256 * 1024              # bytes read from the .tmp file per write to the browser
 
 _CONTENT_RANGE_RE = re.compile(r"^\s*bytes\s+(\d+)-(\d+)/(\d+)\s*$", re.I)
+_RANGE_RE = re.compile(r"^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$", re.I)  # one range only
 
 _entries = {}        # final path -> _Entry (only while a download is in progress)
 _fill_tasks = set()
@@ -164,6 +172,7 @@ class _Entry:
         self.fill_ctx = None  # (request path, [(k, v), ...], use_cpu)
         self.root = "output"  # which ComfyUI folder the file lives in: "input" or "output"
         self.streams = 0      # browser responses for this file being streamed right now
+        self.served_logged = False  # said (once) that /view is answered from the partial file
         self.tlock = threading.Lock()  # serializes all access to the .tmp file
         self._unsaved = 0
         self.last_activity = time.monotonic()  # last time a browser request touched this file
@@ -261,6 +270,24 @@ class _Entry:
 
     def covered(self):
         return sum(e - s for s, e in self.ranges)
+
+    def read_at(self, offset, size):
+        """Bytes [offset, offset + size) if they are on disk, else None. Reads the
+        .tmp file, or the final file if the download finished meanwhile. The lock
+        keeps finalize() and reset() from moving the file during a read, and no
+        handle stays open between reads (an open file blocks the rename on Windows)."""
+        with self.tlock:
+            if not any(s <= offset and offset + size <= e for s, e in self.ranges):
+                return None
+            for p in (self.tmp, self.path):
+                try:
+                    with open(p, "rb") as f:
+                        f.seek(offset)
+                        data = f.read(size)
+                except OSError:
+                    continue
+                return data if len(data) == size else None
+        return None
 
     def complete(self):
         return self.total is not None and self.ranges == [(0, self.total)]
@@ -416,10 +443,8 @@ class _Sink:
             _start_fill(e)
 
 
-def make_sink(path, request, use_cpu):
-    entry = _entries.get(path)
-    if entry is None:
-        entry = _entries[path] = _Entry(path)
+def _note_request(entry, request, use_cpu):
+    """Remember which /view request (and which target) a background download repeats."""
     query = request.rel_url.query
     entry.root = query.get("type", "output")
     entry.fill_ctx = (
@@ -427,7 +452,165 @@ def make_sink(path, request, use_cpu):
         [(k, query[k]) for k in _FILL_QUERY_KEYS if k in query],
         use_cpu,
     )
-    return _Sink(entry, transformed=any(k in query for k in _TRANSFORM_KEYS))
+
+
+def make_sink(path, request, use_cpu):
+    entry = _entries.get(path)
+    if entry is None:
+        entry = _entries[path] = _Entry(path)
+    _note_request(entry, request, use_cpu)
+    return _Sink(entry, transformed=any(k in request.rel_url.query for k in _TRANSFORM_KEYS))
+
+
+# ---------------------------------------------------------------------------
+# Answering from the part of a file that is already on disk
+# ---------------------------------------------------------------------------
+
+def _parse_range(header, total):
+    """(start, end, open_ended), as [start, end), for a Range header that asks for
+    one byte range of a file of `total` bytes. None for anything else (several
+    ranges, a start past the end, a bad header): the remote decides those."""
+    m = _RANGE_RE.match(header or "")
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    first, last = m.groups()
+    if not first:  # "bytes=-N": the last N bytes
+        n = int(last)
+        return (max(0, total - n), total, False) if n > 0 else None
+    start = int(first)
+    if start >= total:
+        return None
+    if not last:  # "bytes=N-": everything from N on
+        return start, total, True
+    if int(last) < start:
+        return None
+    return start, min(int(last) + 1, total), False
+
+
+def _etag_matches(header, etag):
+    """If-None-Match: is our ETag in the browser's list? (weak comparison)"""
+    if not etag:
+        return False
+    if header.strip() == "*":
+        return True
+
+    def bare(tag):
+        tag = tag.strip()
+        return tag[2:] if tag.startswith("W/") else tag
+
+    return any(bare(t) == bare(etag) for t in header.split(","))
+
+
+def _not_modified_since(since, last_modified):
+    """If-Modified-Since: did the file last change no later than the browser's date?"""
+    if not since or not last_modified:
+        return False
+    try:
+        return parsedate_to_datetime(last_modified) <= parsedate_to_datetime(since)
+    except (TypeError, ValueError):
+        return False
+
+
+def _if_range_matches(value, etag, last_modified):
+    """If-Range: the browser wants the range only if the file is still the one it
+    has. Needs a strong ETag, or exactly the Last-Modified date."""
+    value = value.strip()
+    if value.startswith("W/"):
+        return False
+    if value.startswith('"'):
+        return bool(etag) and not etag.startswith("W/") and value == etag
+    return bool(last_modified) and value == last_modified
+
+
+async def serve_partial(request, path, use_cpu=False, remote_awake=False):
+    """Answer a /view request from the part of the file that is already on disk,
+    so the remote is not woken for bytes this computer has. Returns the response,
+    or None when the request must go to the remote as before.
+
+    Only a plain GET with a Range header qualifies (one without it wants the whole
+    file, which is not here yet), and only when every byte it asks for is on disk.
+    "bytes=N-", which is what video players send, gets the stretch from N to the
+    end of the part that is there, as a shorter 206; the player then asks for the
+    rest, and only that request reaches the remote.
+
+    The ETag / Last-Modified the remote gave when the bytes were saved (kept in
+    the .map file) answer If-None-Match, If-Modified-Since and If-Range, so a
+    browser that has a copy gets its 304 here too.
+
+    `remote_awake`: a job is running, so the remote is up anyway; let the
+    background download go on with the missing parts."""
+    if request.method != "GET":
+        return None
+    if any(k in request.rel_url.query for k in _TRANSFORM_KEYS):
+        return None  # the remote makes a thumbnail from the whole file
+    entry = _entries.get(path)
+    if entry is None:
+        if not (os.path.isfile(path + ".tmp") and os.path.isfile(path + ".map")):
+            return None
+        entry = _entries[path] = _Entry(path)  # reads the .map file
+    if entry.failed or entry.done or entry.total is None or not entry.ranges:
+        return None
+
+    h = request.headers
+    validators = {}
+    if entry.etag:
+        validators["ETag"] = entry.etag
+    if entry.last_modified:
+        validators["Last-Modified"] = entry.last_modified
+    if "If-None-Match" in h:
+        not_modified = _etag_matches(h["If-None-Match"], entry.etag)
+    else:
+        not_modified = _not_modified_since(h.get("If-Modified-Since"), entry.last_modified)
+    if not_modified:
+        return web.Response(status=304, headers=validators)
+
+    wanted = _parse_range(h.get("Range"), entry.total)
+    if wanted is None:
+        return None
+    if "If-Range" in h and not _if_range_matches(h["If-Range"], entry.etag, entry.last_modified):
+        return None
+    start, end, open_ended = wanted
+    run_end = next((e for s, e in entry.ranges if s <= start < e), None)  # end of the stretch that has `start`
+    if run_end is None or (run_end < end and not open_ended):
+        return None
+    end = min(end, run_end)
+
+    if not entry.served_logged:
+        entry.served_logged = True
+        logger.info(
+            f"[ComfyUI Proxy] Answering /view of {entry.path} from its partly downloaded copy "
+            f"(bytes {start}-{end - 1} of {entry.total}); the remote is not asked for them."
+        )
+    entry.last_activity = time.monotonic()
+    if remote_awake:
+        _note_request(entry, request, use_cpu)
+        _start_fill(entry)
+
+    headers = {
+        **validators,
+        "Content-Type": mimetypes.guess_type(path)[0] or "application/octet-stream",
+        "Accept-Ranges": "bytes",
+        "Content-Range": f"bytes {start}-{end - 1}/{entry.total}",
+        "Content-Length": str(end - start),
+    }
+    resp = web.StreamResponse(status=206, headers=headers)
+    try:
+        await resp.prepare(request)
+        pos = start
+        while pos < end:
+            chunk = await asyncio.to_thread(entry.read_at, pos, min(SERVE_CHUNK, end - pos))
+            if chunk is None:  # the file changed under us
+                break
+            await resp.write(chunk)
+            pos += len(chunk)
+            entry.last_activity = time.monotonic()
+        if pos >= end:
+            await resp.write_eof()
+        elif request.transport is not None:
+            request.transport.close()  # cut short; the browser asks again, and that goes to the remote
+    except ConnectionError:  # the browser went away (a player dropping a Range request)
+        logger.debug(f"[ComfyUI Proxy] Browser closed the connection while serving {entry.path} locally.")
+    return resp
 
 
 # ---------------------------------------------------------------------------

@@ -1084,6 +1084,14 @@ async def proxy_middleware(request: web.Request, handler):
         if view_local_path is not None:
             if os.path.isfile(view_local_path):
                 return await handler(request)
+            # Only part of it is on disk: a Range request for bytes that are all
+            # there is answered locally, so it doesn't wake the remote.
+            partial = await viewcache.serve_partial(
+                request, view_local_path,
+                use_cpu=_use_cpu_target(canonical, path), remote_awake=_remote_known_active(),
+            )
+            if partial is not None:
+                return partial
             if request.method != "GET":
                 view_local_path = None
 
