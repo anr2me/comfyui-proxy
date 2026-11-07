@@ -105,6 +105,10 @@ def _saved_response(data, status=200) -> web.Response:
 
 
 def _passthrough(status, data, text) -> web.Response:
+    if status >= 400:
+        # The remote's own error answer can name its host (a gateway page, say): hide it.
+        data = logsafe.sanitize_json(data)
+        text = logsafe.sanitize_logs(text) if text else text
     if data is not None:
         return web.json_response(data, status=status)
     return web.Response(text=text or "", status=status)

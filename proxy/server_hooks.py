@@ -462,6 +462,10 @@ async def _handle_prompt(request: web.Request) -> web.Response:
         return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {logsafe.sanitize_logs(e)}"}, status=502)
 
     forwarder.circuit_record_success()
+    if status >= 400:
+        # The remote's own error answer can name its host (a gateway page, a traceback): hide it.
+        data = logsafe.sanitize_json(data)
+        text = logsafe.sanitize_logs(text) if text else text
     if data is not None:
         if 200 <= status < 300:
             prompt_id = data.get("prompt_id")
@@ -612,6 +616,8 @@ async def _handle_queue(request: web.Request) -> web.Response:
         return web.json_response({"error": f"ComfyUI Proxy: failed to reach remote GPU: {logsafe.sanitize_logs(e)}"}, status=502)
 
     forwarder.circuit_record_success()
+    if status >= 400:
+        data = logsafe.sanitize_json(data)  # the remote's error answer can name its host
     if data is not None:
         if not data.get("queue_running") and not data.get("queue_pending"):
             state.clear_all()

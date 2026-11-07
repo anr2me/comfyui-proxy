@@ -197,6 +197,11 @@ Tap the pill, then the label, to open the panel.
   replace sensitive information such as the host of your remote URLs and your auth keys with placeholders
   such as `<RemoteGPU_Host>` and `<RemoteGPU_AuthKey>`, so they can be safely pasted into a bug report.  
   Skim them anyway: lines from ComfyUI or other extensions aren't covered.
+- The remote can write its own host in error messages and in log lines. The
+  proxy replaces the host and the Auth Keys in this text with the same
+  placeholders. The proxy also removes the host from redirects and from cookie
+  settings, so your browser never gets the host. The proxy does not change
+  files or the normal answers to your requests.
 - Before sending a prompt, the proxy checks that the remote really is a running
   ComfyUI. If the address answers but isn't (HTTP 404 from a stopped app or a
   usage limit or credits used up at your provider; 401/403 for a wrong Auth

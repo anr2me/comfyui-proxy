@@ -50,6 +50,7 @@ from aiohttp import web
 from . import config as cfgmod
 from . import files_db
 from . import forwarder
+from . import logsafe
 
 logger = logging.getLogger("ComfyUIProxy")
 
@@ -217,8 +218,8 @@ async def handle_request(request: web.Request, reachable: bool, use_cpu: bool) -
                 else:
                     logger.warning(f"[ComfyUI Proxy] The remote {label} answered {path} with HTTP {status}; showing the saved list.")
             else:
-                # A 4xx is the remote's own answer to a bad request; show it as is.
-                return web.Response(body=raw, status=status, content_type=ctype)
+                # A 4xx is the remote's own answer to a bad request; show it, without the remote's host or keys.
+                return web.Response(body=logsafe.sanitize_body(raw, ctype), status=status, content_type=ctype)
 
     data = await asyncio.to_thread(_lookup, remote, key)
     if data is _MISSING:

@@ -66,6 +66,7 @@ from . import files_cache
 from . import forwarder
 from . import jobs_cache
 from . import keepalive
+from . import logsafe
 from . import placeholders
 from . import state
 from . import viewcache
@@ -154,7 +155,7 @@ async def _inject_local(client_id: str, msg: aiohttp.WSMessage):
         return  # browser not (yet/currently) connected locally; drop silently
     try:
         if msg.type == aiohttp.WSMsgType.TEXT:
-            await ws.send_str(msg.data)
+            await ws.send_str(logsafe.sanitize_message(msg.data))  # log lines and tracebacks can name the remote's host
         elif msg.type == aiohttp.WSMsgType.BINARY:
             await ws.send_bytes(msg.data)
     except Exception as e:

@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import logging
 import time
+import zlib
 from collections import namedtuple
 from urllib.parse import urlsplit
 
@@ -422,6 +423,61 @@ async def _do_wake_ping(base: str, reason: str, use_cpu: bool = False):
     return WakeResult(None, None)
 
 
+ERROR_BODY_LIMIT = 256 * 1024  # an error answer bigger than this (once decoded: 4x) is not passed on
+
+
+def _decode_error_body(raw: bytes, encoding):
+    """The body of an error answer without its Content-Encoding, or None when this
+    environment cannot decode it (no br/zstd package) or it is far too big."""
+    encoding = (encoding or "").strip().lower()
+    if encoding in ("", "identity"):
+        return raw
+    try:
+        if encoding in ("gzip", "x-gzip", "deflate"):
+            for wbits in (47, -zlib.MAX_WBITS):  # gzip or zlib framing, then raw deflate
+                try:
+                    decoder = zlib.decompressobj(wbits)
+                    body = decoder.decompress(raw, ERROR_BODY_LIMIT * 4)
+                except zlib.error:
+                    continue
+                return None if decoder.unconsumed_tail else body
+            return None
+        for name in {"br": ("brotli", "brotlicffi"), "zstd": ("compression.zstd", "backports.zstd")}.get(encoding, ()):
+            try:
+                module = importlib.import_module(name)
+            except ImportError:
+                continue
+            return module.decompress(raw)
+    except Exception:
+        pass
+    return None
+
+
+async def _sanitized_error_response(remote_resp, resp_headers: dict, label: str) -> web.Response:
+    """The remote's error answer (HTTP 4xx/5xx) for the browser, with the hosts and keys
+    replaced in its text. The frontend can show this text in a dialog, and a gateway's
+    error page may name the host it comes from. The body is read in full first, which is
+    fine for an error answer. One that is too big, or that this environment cannot
+    decode, is replaced by a short message."""
+    body = bytearray()
+    complete = True
+    async for chunk in remote_resp.content.iter_any():
+        body += chunk
+        if len(body) > ERROR_BODY_LIMIT:
+            complete = False
+            break
+    raw = _decode_error_body(bytes(body), remote_resp.headers.get("Content-Encoding")) if complete else None
+    if raw is None:
+        headers = {k: v for k, v in resp_headers.items() if k.lower() not in ("content-type", "content-encoding", "content-length")}
+        return web.json_response(
+            {"error": f"ComfyUI Proxy: remote {label} answered HTTP {remote_resp.status}; its message is not shown"},
+            status=remote_resp.status, headers=headers,
+        )
+    headers = {k: v for k, v in resp_headers.items() if k.lower() not in ("content-encoding", "content-length")}
+    raw = logsafe.sanitize_body(raw, remote_resp.headers.get("Content-Type", ""), remote_resp.charset)
+    return web.Response(body=raw, status=remote_resp.status, headers=headers)
+
+
 async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -> web.StreamResponse:
     """Stream a single HTTP request/response through to the target (GPU by
     default, or the optional CPU-only target when use_cpu is True),
@@ -462,10 +518,20 @@ async def forward_http(request: web.Request, use_cpu: bool = False, sink=None) -
             ) as remote_resp:
                 # Copy headers verbatim (this is what preserves gzip/br/zstd
                 # Content-Encoding and Content-Range for partial/streamed content).
-                resp_headers = {k: v for k, v in remote_resp.headers.items() if k.lower() not in HOP_BY_HOP}
+                # A link to the remote itself (a redirect) and any host or key in a header are rewritten first.
+                resp_headers = logsafe.safe_response_headers(
+                    {k: v for k, v in remote_resp.headers.items() if k.lower() not in HOP_BY_HOP}
+                )
 
                 if remote_resp.status >= 500:
                     logger.error(f"[ComfyUI Proxy] Remote {label} returned {remote_resp.status} for {request.method} {request.rel_url.path}")
+
+                if remote_resp.status >= 400:
+                    # An error answer is not file data: it is shown to the user, so it is cleaned, not streamed.
+                    if sink is not None:
+                        sink.begin(remote_resp.status, remote_resp.headers)
+                        sink.end(True)
+                    return await _sanitized_error_response(remote_resp, resp_headers, label)
 
                 stream_resp = web.StreamResponse(status=remote_resp.status, headers=resp_headers)
                 if sink is not None:

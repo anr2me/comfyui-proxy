@@ -26,6 +26,7 @@ Values shorter than a few characters are left alone: replacing a 2-letter "key"
 would mangle ordinary text more than it protects anything.
 """
 
+import json
 import logging
 import re
 import threading
@@ -122,18 +123,142 @@ def _compiled():
     return _regex["compiled"]
 
 
-def sanitize_logs(value) -> str:
-    """`value` (an exception, a message, ...) as text, with the remotes' hosts and
-    the auth keys replaced by placeholders."""
-    text = value if isinstance(value, str) else str(value)
+def _current_pattern():
+    """The pattern for the hosts and keys known right now, or None if there are none."""
     try:
         remember()
     except Exception:
         pass  # the config couldn't be read: go on with what is already known
-    pattern = _compiled()
+    return _compiled()
+
+
+def _scrub(text, pattern):
     if pattern is None:
         return text
     return pattern.sub(lambda m: _secrets.get(m.group(0)) or _hosts.get(m.group(0).lower()) or m.group(0), text)
+
+
+def sanitize_logs(value) -> str:
+    """`value` (an exception, a message, ...) as text, with the remotes' hosts and
+    the auth keys replaced by placeholders."""
+    text = value if isinstance(value, str) else str(value)
+    return _scrub(text, _current_pattern())
+
+
+# ---------------------------------------------------------------------------
+# What the remote sends to the browser through this proxy: error answers, headers
+# and websocket messages (its log lines, its error tracebacks). The remote writes
+# that text, so it can name the remote's own host: a gateway's error page, a
+# redirect to its address. The helpers below clean it the same way as the logs.
+# ---------------------------------------------------------------------------
+
+def _scrub_json(value, pattern):
+    """Parsed JSON with the replacement made in every string, keys included."""
+    if isinstance(value, str):
+        return _scrub(value, pattern)
+    if isinstance(value, list):
+        return [_scrub_json(v, pattern) for v in value]
+    if isinstance(value, dict):
+        return {(_scrub(k, pattern) if isinstance(k, str) else k): _scrub_json(v, pattern) for k, v in value.items()}
+    return value
+
+
+def sanitize_json(value):
+    """Parsed JSON (or None) with the remotes' hosts and the auth keys replaced in all its strings."""
+    pattern = _current_pattern()
+    return value if pattern is None else _scrub_json(value, pattern)
+
+
+def sanitize_message(text: str) -> str:
+    """A text message (JSON) that the remote sent over the websocket, ready for the
+    browser. When there is nothing to replace, the very same text comes back, so a
+    normal message only costs one parse."""
+    pattern = _current_pattern()
+    if pattern is None:
+        return text
+    try:
+        data = json.loads(text)
+        clean = _scrub_json(data, pattern)
+        return text if clean == data else json.dumps(clean)
+    except (ValueError, RecursionError):
+        return _scrub(text, pattern)  # not JSON: treat it as plain text
+
+
+def _media_type(content_type) -> str:
+    return (content_type or "").split(";", 1)[0].strip().lower()
+
+
+def sanitize_body(raw: bytes, content_type: str = "", charset=None) -> bytes:
+    """The body of an answer from the remote with the hosts and keys replaced, when it
+    is text (JSON, HTML, ...). Anything else, and a text with nothing to replace, comes
+    back unchanged. `charset` is the one the answer declares (UTF-8 if it declares none)."""
+    kind = _media_type(content_type)
+    if not raw or not (kind.startswith("text/") or kind.endswith(("json", "xml", "javascript"))):
+        return raw
+    pattern = _current_pattern()
+    if pattern is None:
+        return raw
+    codec = charset or "utf-8"
+    try:
+        text = raw.decode(codec, errors="replace")
+    except LookupError:
+        codec = "utf-8"
+        text = raw.decode(codec, errors="replace")
+    clean = text
+    if kind.endswith("json"):
+        try:
+            data = json.loads(text)
+            scrubbed = _scrub_json(data, pattern)
+            if scrubbed != data:
+                clean = json.dumps(scrubbed)
+        except (ValueError, RecursionError):
+            pass
+    clean = _scrub(clean, pattern)
+    return raw if clean == text else clean.encode(codec, errors="replace")
+
+
+_COOKIE_DOMAIN_RE = re.compile(r";\s*Domain=[^;]*", re.I)
+_LOCATION_HEADERS = ("location", "content-location")
+_URL_HEADERS = _LOCATION_HEADERS + ("link", "refresh")
+_own_url = {"size": -1, "compiled": None}
+
+
+def _own_url_prefix():
+    """Pattern for the start of a URL that points at one of the remotes ("https://host",
+    with any port and user:password), or None while no host is known."""
+    size = len(_hosts)
+    if _own_url["size"] != size:
+        with _lock:
+            hosts = sorted(_hosts, key=len, reverse=True)
+            _own_url["compiled"] = re.compile(
+                r"\b(?:https?|wss?)://(?:[^/?#@\s]*@)?(?:" + "|".join(re.escape(h) for h in hosts) + r")(?::\d+)?(?![\w.-])",
+                re.I,
+            ) if hosts else None
+            _own_url["size"] = size
+    return _own_url["compiled"]
+
+
+def safe_response_headers(headers: dict) -> dict:
+    """The headers of an answer from a remote, ready for the browser.
+      - A link that points at the remote itself (Location of a redirect, ...) loses its
+        scheme and host: "https://abc.modal.run/view?x=1" becomes "/view?x=1". The browser
+        then asks this computer again, which forwards the request, instead of going to the
+        remote directly and seeing its address.
+      - A cookie loses its Domain, which names the remote and would not apply here anyway.
+      - Any other mention of a host or key is replaced by its placeholder."""
+    pattern = _current_pattern()
+    prefix = _own_url_prefix()
+    clean = {}
+    for name, value in headers.items():
+        key = name.lower()
+        if key == "set-cookie":
+            value = _COOKIE_DOMAIN_RE.sub("", value)
+        elif key in _URL_HEADERS and prefix is not None:
+            value = prefix.sub("", value)
+            if not value.strip() and key in _LOCATION_HEADERS:
+                value = "/"
+        clean[name] = _scrub(value, pattern)
+    return clean
 
 
 class SanitizeFilter(logging.Filter):
