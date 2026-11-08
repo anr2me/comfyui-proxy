@@ -66,7 +66,6 @@ SCAN_DELAY = 3.0                      # quiet period (s) after the last finished
 SERVE_CHUNK = 256 * 1024              # bytes read from the .tmp file per write to the browser
 
 _CONTENT_RANGE_RE = re.compile(r"^\s*bytes\s+(\d+)-(\d+)/(\d+)\s*$", re.I)
-_RANGE_RE = re.compile(r"^\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*$", re.I)  # one range only
 
 _entries = {}        # final path -> _Entry (only while a download is in progress)
 _fill_tasks = set()
@@ -466,14 +465,34 @@ def make_sink(path, request, use_cpu):
 # Answering from the part of a file that is already on disk
 # ---------------------------------------------------------------------------
 
+def _split_range(header):
+    """(first, last) digit strings from a single "bytes=a-b" Range header, else
+    None. Plain string methods instead of a regex: the header comes from the
+    browser, and a pattern with adjacent optional-whitespace and digit groups
+    backtracks quadratically on it (CodeQL py/polynomial-redos)."""
+    if not header or len(header) > 200:
+        return None
+    unit, eq, spec = header.partition("=")
+    if not eq or unit.strip().lower() != "bytes":
+        return None
+    first, dash, last = spec.partition("-")
+    if not dash:
+        return None
+    first, last = first.strip(), last.strip()
+    for part in (first, last):
+        if part and not (part.isascii() and part.isdigit()):
+            return None  # also rejects several ranges ("0-1,3-4")
+    return first, last
+
+
 def _parse_range(header, total):
     """(start, end, open_ended), as [start, end), for a Range header that asks for
     one byte range of a file of `total` bytes. None for anything else (several
     ranges, a start past the end, a bad header): the remote decides those."""
-    m = _RANGE_RE.match(header or "")
-    if not m or not (m.group(1) or m.group(2)):
+    parts = _split_range(header)
+    if not parts or not (parts[0] or parts[1]):
         return None
-    first, last = m.groups()
+    first, last = parts
     if not first:  # "bytes=-N": the last N bytes
         n = int(last)
         return (max(0, total - n), total, False) if n > 0 else None
