@@ -18,9 +18,15 @@ Covered: the host (with its port) of the Remote GPU URL and of the Remote CPU UR
 session stay covered after they are changed, since an error can still mention them.
 
 The same filter sits on aiohttp's server logger and asyncio's, which is where an
-error that nothing caught would be logged, with its message. It cannot cover lines
-logged by ComfyUI or other custom nodes. sanitize_logs() is also used on the error
-messages the proxy sends to the UI.
+error that nothing caught would be logged, with its message. sanitize_logs() is also
+used on the error messages the proxy sends to the UI.
+
+Lines of ComfyUI and of other custom nodes are cleaned too, but only while the proxy
+is on, so that turning it off shows an extension's own lines unchanged. A log record
+of any logger is checked when it is created (a log record factory), and what is
+written to stdout and stderr, a print() for example, is checked when it is written.
+A line with nothing to hide is left exactly as it is. A custom node that writes
+somewhere else, to a file of its own for example, is not covered.
 
 Values shorter than a few characters are left alone: replacing a 2-letter "key"
 would mangle ordinary text more than it protects anything.
@@ -29,6 +35,7 @@ would mangle ordinary text more than it protects anything.
 import json
 import logging
 import re
+import sys
 import threading
 from urllib.parse import quote, urlsplit
 
@@ -290,12 +297,124 @@ class SanitizeFilter(logging.Filter):
         return True
 
 
+# ---------------------------------------------------------------------------
+# Lines of ComfyUI and of other custom nodes
+# ---------------------------------------------------------------------------
+# Cleaned only while the proxy is on (the "enabled" setting): with the proxy off, the
+# lines of an extension show as it wrote them. The setting is read for every line, so
+# turning the proxy on or off takes effect at once.
+
+_WITHHELD = "[ComfyUI Proxy] (a line was withheld: it could not be checked for the remote's address or key)"
+_CHECKED = "_comfyui_proxy_checked"
+_busy = threading.local()  # set while this module works on a line: what that work writes itself is left alone
+_seen = {"config": None}
+
+
+def _pattern_if_on():
+    """The pattern for the hosts and keys to hide in the lines of other code: None while
+    the proxy is off, or when there is nothing to hide."""
+    if not cfgmod.get("enabled"):
+        return None
+    config = cfgmod.load_config()
+    if config is not _seen["config"]:  # a saved change makes a new config: look at it again
+        try:
+            remember()
+        except Exception:
+            pass  # the config couldn't be read: go on with what is already known
+        _seen["config"] = config
+    return _compiled()
+
+
+def _clean_record(record):
+    """Replace the hosts and keys in a log record of any logger, in place. A record
+    with nothing to hide is left exactly as it is."""
+    if getattr(record, _CHECKED, False):
+        return
+    pattern = _pattern_if_on()
+    if pattern is None:
+        return
+    try:
+        message = record.getMessage()
+    except Exception:
+        return  # a broken format string: logging reports that itself
+    try:
+        clean = _scrub(message, pattern)
+        if clean != message:
+            record.msg, record.args = clean, None
+        if record.exc_info and not record.exc_text:
+            text = logging.Formatter().formatException(record.exc_info)
+            clean = _scrub(text, pattern)
+            if clean != text:
+                record.exc_text, record.exc_info = clean, None
+        elif record.exc_text:
+            record.exc_text = _scrub(record.exc_text, pattern)
+        if record.stack_info:
+            record.stack_info = _scrub(record.stack_info, pattern)
+    except Exception:
+        record.msg, record.args = _WITHHELD, None
+        record.exc_info = record.exc_text = record.stack_info = None
+    setattr(record, _CHECKED, True)
+
+
+def _install_record_factory():
+    """Check every log record when it is created, so that a record of any logger and
+    every handler (the console, the log panel of the UI, a file) gets the clean text."""
+    previous = logging.getLogRecordFactory()
+    if getattr(previous, "_comfyui_proxy", False):
+        return
+
+    def factory(*args, **kwargs):
+        record = previous(*args, **kwargs)
+        if not getattr(_busy, "on", False):
+            _busy.on = True
+            try:
+                _clean_record(record)
+            finally:
+                _busy.on = False
+        return record
+
+    factory._comfyui_proxy = True
+    logging.setLogRecordFactory(factory)
+
+
+def _guard_stream(stream):
+    """Check what is written to `stream` (the print() of another extension, say) while
+    the proxy is on. This is done on the stream object itself, so it also covers the
+    holders of that object, such as the console logging handler and ComfyUI's log panel."""
+    if stream is None or getattr(stream, "_comfyui_proxy_guarded", False):
+        return
+    original = stream.write
+
+    def write(data, *args, **kwargs):
+        if isinstance(data, str) and data and not getattr(_busy, "on", False):
+            _busy.on = True
+            try:
+                pattern = _pattern_if_on()
+                if pattern is not None:
+                    data = _scrub(data, pattern)
+            except Exception:
+                data = _WITHHELD + "\n"
+            finally:
+                _busy.on = False
+        return original(data, *args, **kwargs)
+
+    try:
+        stream._comfyui_proxy_guarded = True
+        stream.write = write
+    except (AttributeError, TypeError):
+        pass  # a stream that cannot be changed (a plain TextIOWrapper): the log records are still cleaned
+
+
 def install():
-    """Put the filter on the loggers above, once."""
+    """Put the filter on the loggers above, and the checks for the lines of other code
+    on the log records and on stdout and stderr, once."""
     for name in LOGGERS:
         logger = logging.getLogger(name)
         if not any(isinstance(f, SanitizeFilter) for f in logger.filters):
             logger.addFilter(SanitizeFilter())
+    _install_record_factory()
+    _guard_stream(sys.stdout)
+    _guard_stream(sys.stderr)
 
 
 install()

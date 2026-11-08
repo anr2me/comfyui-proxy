@@ -196,7 +196,10 @@ Tap the pill, then the label, to open the panel.
 - The proxy's own log lines, and the error messages it shows in the UI,
   replace sensitive information such as the host of your remote URLs and your auth keys with placeholders
   such as `<RemoteGPU_Host>` and `<RemoteGPU_AuthKey>`, so they can be safely pasted into a bug report.  
-  Skim them anyway: lines from ComfyUI or other extensions aren't covered.
+  While the proxy is on, it does the same for the lines of ComfyUI and of other
+  extensions (log lines and `print` output). When you turn the proxy off, these
+  lines show as the extension wrote them. Skim them anyway. An extension that
+  writes to its own file is not covered.
 - The remote can write its own host in error messages and in log lines. The
   proxy replaces the host and the Auth Keys in this text with the same
   placeholders. The proxy also removes the host from redirects and from cookie
