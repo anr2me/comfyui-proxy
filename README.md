@@ -202,6 +202,10 @@ Tap the pill, then the label, to open the panel.
   placeholders. The proxy also removes the host from redirects and from cookie
   settings, so your browser never gets the host. The proxy does not change
   files or the normal answers to your requests.
+- The proxy does not send your browser's cookies, your login (the
+  `Authorization` header), the address of your page (`Origin`, `Referer`) or
+  forwarding headers (such as `X-Forwarded-For`) to the remote. The remote
+  gets only the Auth Key that you set.
 - Before sending a prompt, the proxy checks that the remote really is a running
   ComfyUI. If the address answers but isn't (HTTP 404 from a stopped app or a
   usage limit or credits used up at your provider; 401/403 for a wrong Auth

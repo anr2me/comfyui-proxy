@@ -311,10 +311,29 @@ def _auth_key_for(use_cpu: bool = False):
     return cfgmod.get("remote_cpu_auth_key" if use_cpu else "auth_key")
 
 
+# Headers of the browser's request that are not passed on to the remote: they belong to the
+# person's own computer, not to the remote. Passing them on would hand the remote (or the
+# gateway in front of it) things it must not have:
+LOCAL_ONLY_HEADERS = {
+    "cookie",         # the person's cookies for this local ComfyUI (the session keeps the remote's own)
+    "authorization",  # the person's login for this local ComfyUI. The remote gets the Auth Key instead
+    "origin", "referer",  # the address of the local page: a LAN address, or a public tunnel
+    "forwarded", "x-real-ip", "via", "cf-connecting-ip", "true-client-ip",  # added by a reverse proxy
+}                         # in front of ComfyUI: the person's own address (X-Forwarded-* too)
+
+
+def _is_local_only(name: str) -> bool:
+    name = name.lower()
+    return name in LOCAL_ONLY_HEADERS or name.startswith("x-forwarded-")
+
+
 def copy_request_headers(request: web.Request, limit_encoding: bool = False, use_cpu: bool = False) -> dict:
+    """The headers for a request to the remote: the browser's, without the hop-by-hop
+    ones and without those of LOCAL_ONLY_HEADERS, and with the Auth Key (if one is set)
+    as `Authorization: Bearer`."""
     headers = {}
     for k, v in request.headers.items():
-        if k.lower() in HOP_BY_HOP:
+        if k.lower() in HOP_BY_HOP or _is_local_only(k):
             continue
         headers[k] = v
     if limit_encoding:
