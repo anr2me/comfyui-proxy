@@ -50,12 +50,8 @@ Tap the pill, then the label, to open the panel.
   only helps if it's a genuinely different, separately-running endpoint —
   pointing it at the same URL as your GPU one does nothing useful.
 - **Remote CPU Auth Key** *(optional)* — bearer token for the CPU endpoint,
-  if it needs one.
-- **Saved Auth Keys** — the proxy saves both Auth Keys as plain text in
-  `proxy_config.json`, in this folder. Keep this file private. Do not add it
-  to Git. If you change the host of a URL, the proxy removes the saved Auth
-  Key for that URL. This stops a key from going to a different server. Enter
-  the key again if the new endpoint needs one.
+  if it needs one. The proxy saves both Auth Keys on your computer. See
+  [Security](#security).
 - **Timeout** — how long to wait for the remote to respond before giving
   up, in seconds. Serverless GPUs can take a while to cold-start when
   capacity is scarce, so this defaults fairly high (300s). Raise it if you
@@ -193,27 +189,39 @@ Tap the pill, then the label, to open the panel.
   and the **Deep Free Now** button of Feixue.
   To change the placeholder, edit `GPU_NAME`, `GPU_COUNT` and `GPU_VRAM_GB`
   near the top of `proxy/config.py`.
-- The proxy's own log lines, and the error messages it shows in the UI,
-  replace sensitive information such as the host of your remote URLs and your auth keys with placeholders
-  such as `<RemoteGPU_Host>` and `<RemoteGPU_AuthKey>`, so they can be safely pasted into a bug report.  
-  While the proxy is on, it does the same for the lines of ComfyUI and of other
-  extensions (log lines and `print` output). When you turn the proxy off, these
-  lines show as the extension wrote them. Skim them anyway. An extension that
-  writes to its own file is not covered.
-- The remote can write its own host in error messages and in log lines. The
-  proxy replaces the host and the Auth Keys in this text with the same
-  placeholders. The proxy also removes the host from redirects and from cookie
-  settings, so your browser never gets the host. The proxy does not change
-  files or the normal answers to your requests.
-- The proxy does not send your browser's cookies, your login (the
-  `Authorization` header), the address of your page (`Origin`, `Referer`) or
-  forwarding headers (such as `X-Forwarded-For`) to the remote. The remote
-  gets only the Auth Key that you set.
 - Before sending a prompt, the proxy checks that the remote really is a running
   ComfyUI. If the address answers but isn't (HTTP 404 from a stopped app or a
   usage limit or credits used up at your provider; 401/403 for a wrong Auth
   Key), the **Run** button says so instead of failing with an unexplained
   error, and nothing is sent to the remote.
+
+## Security
+
+How the proxy handles your Auth Keys and your remote hosts.
+
+- **Saved Auth Keys.** The proxy saves both Auth Keys as plain text in
+  `proxy_config.json`, in this folder. Keep this file private. Do not add it
+  to Git. If you change the host of a URL, the proxy removes the saved key for
+  that URL. This stops a key from going to a different server. Enter the key
+  again if the new endpoint needs one.
+- **Hidden hosts and keys in logs.** The proxy hides the host of your remote
+  URLs and your Auth Keys in its own log lines and in the errors it shows in
+  the UI. It shows placeholders such as `<RemoteGPU_Host>` and
+  `<RemoteGPU_AuthKey>` instead. You can paste these lines in a bug report.
+  While the proxy is on, it does the same for the log lines and `print`
+  output of ComfyUI and other extensions. When you turn the proxy off, these
+  lines show as the extension wrote them. Read them before you share them.
+  The proxy does not cover an extension that writes to its own file.
+- **Clean text from the remote.** The remote can write its own host in error
+  messages and log lines. The proxy replaces the host and the Auth Keys in
+  this text with the same placeholders. It also removes the host from
+  redirects and cookie settings, so your browser never gets the host. It does
+  not change files or the normal answers to your requests.
+- **Private data stays on your computer.** The proxy does not send these
+  items to the remote: your browser's cookies, your login (the `Authorization`
+  header), the address of your page (`Origin`, `Referer`) and forwarding
+  headers (such as `X-Forwarded-For`). The remote gets only the Auth Key that
+  you set.
 
 ## If something seems stuck
 
